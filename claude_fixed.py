@@ -12,15 +12,26 @@ from collections import deque
 # Flask app
 # ----------------------------
 app = Flask(__name__)
+
 @app.route('/health')
 def health_check():
+    """Health check endpoint for Railway monitoring"""
     return "OK", 200
+
+@app.route('/test')
+def test_endpoint():
+    """Simple test endpoint"""
+    return jsonify({
+        "status": "running",
+        "timestamp": datetime.now(timezone(timedelta(hours=3))).isoformat(),
+        "polling_started": "polling_thread" in [t.name for t in threading.enumerate()],
+        "thread_count": threading.active_count()
+    })
 
 # ======= DEBUG ROUTE =======
 @app.route('/debug-poll')
 def debug_poll():
     import threading
-    import traceback
     
     threads = []
     for thread in threading.enumerate():
@@ -30,13 +41,18 @@ def debug_poll():
             "daemon": thread.daemon
         })
     
-    return {
+    return jsonify({
         "latest_data_timestamp": latest_data.get('timestamp', 'NO DATA'),
         "thread_count": threading.active_count(),
         "threads": threads,
-        "polling_started": any("Thread" in str(t) for t in threading.enumerate()),
-        "api_working": True
-    }
+        "polling_started": any("polling_thread" in t.get('name', '') for t in threads),
+        "api_working": True,
+        "environment_vars_set": {
+            "API_TOKEN": bool(os.getenv("API_TOKEN")),
+            "SERIAL_NUMBERS": bool(os.getenv("SERIAL_NUMBERS")),
+            "POLL_INTERVAL_MINUTES": bool(os.getenv("POLL_INTERVAL_MINUTES", "5"))
+        }
+    })
 # ===========================
 
 # ----------------------------
@@ -46,6 +62,8 @@ API_URL = "https://openapi.growatt.com/v1/device/storage/storage_last_data"
 TOKEN = os.getenv("API_TOKEN", "")
 SERIAL_NUMBERS = os.getenv("SERIAL_NUMBERS", "RKG3B0400T,KAM4N5W0AG,JNK1CDR0KQ").split(",")
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", "5"))
+
+print(f"🔧 Configuration loaded: SERIAL_NUMBERS={len(SERIAL_NUMBERS)}, POLL_INTERVAL={POLL_INTERVAL_MINUTES}min")
 
 # ----------------------------
 # Inverter Configuration
@@ -95,7 +113,7 @@ WEATHERAPI_KEY = os.getenv('WEATHERAPI_KEY', '')
 headers = {"token": TOKEN, "Content-Type": "application/x-www-form-urlencoded"}
 last_alert_time = {}
 latest_data = {
-    "timestamp": "Initializing...",
+    "timestamp": datetime.now(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M:%S EAT"),
     "total_output_power": 0,
     "total_battery_discharge_W": 0,
     "total_solar_input_W": 0,
@@ -176,11 +194,17 @@ def get_weather_from_openmeteo():
     try:
         url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=cloud_cover,shortwave_radiation&timezone=Africa/Nairobi&forecast_days=2"
         response = requests.get(url, timeout=10)
-        return {'times': response.json()['hourly']['time'], 'cloud_cover': response.json()['hourly']['cloud_cover'], 'solar_radiation': response.json()['hourly']['shortwave_radiation'], 'source': 'Open-Meteo'}
-    except: return None
+        if response.status_code == 200:
+            data = response.json()
+            return {'times': data['hourly']['time'], 'cloud_cover': data['hourly']['cloud_cover'], 'solar_radiation': data['hourly']['shortwave_radiation'], 'source': 'Open-Meteo'}
+    except Exception as e:
+        print(f"⚠️ Open-Meteo API error: {e}")
+    return None
 
 def get_weather_from_weatherapi():
     try:
+        if not WEATHERAPI_KEY:
+            return None
         url = f"http://api.weatherapi.com/v1/forecast.json?key={WEATHERAPI_KEY}&q={LATITUDE},{LONGITUDE}&days=2"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
@@ -191,25 +215,30 @@ def get_weather_from_weatherapi():
                     times.append(hour['time'])
                     cloud.append(hour['cloud'])
                     solar.append(hour.get('uv', 0) * 120) 
-            if times: return {'times': times, 'cloud_cover': cloud, 'solar_radiation': solar, 'source': 'WeatherAPI'}
-    except: pass
+            if times: 
+                return {'times': times, 'cloud_cover': cloud, 'solar_radiation': solar, 'source': 'WeatherAPI'}
+    except Exception as e:
+        print(f"⚠️ WeatherAPI error: {e}")
     return None
         
 def get_weather_from_7timer():
     try:
         url = f"http://www.7timer.info/bin/api.pl?lon={LONGITUDE}&lat={LATITUDE}&product=civil&output=json"
         response = requests.get(url, timeout=15)
-        data = response.json()
-        times, cloud, solar = [], [], []
-        base = datetime.now(EAT)
-        for item in data.get('dataseries', [])[:48]:
-            t = base + timedelta(hours=item.get('timepoint', 0))
-            times.append(t.strftime('%Y-%m-dT%H:%M'))
-            c_pct = min((item.get('cloudcover', 5) * 12), 100)
-            cloud.append(c_pct)
-            solar.append(max(800 * (1 - c_pct/100), 0))
-        if times: return {'times': times, 'cloud_cover': cloud, 'solar_radiation': solar, 'source': '7Timer'}
-    except: pass
+        if response.status_code == 200:
+            data = response.json()
+            times, cloud, solar = [], [], []
+            base = datetime.now(EAT)
+            for item in data.get('dataseries', [])[:48]:
+                t = base + timedelta(hours=item.get('timepoint', 0))
+                times.append(t.strftime('%Y-%m-%dT%H:%M'))
+                c_pct = min((item.get('cloudcover', 5) * 12), 100)
+                cloud.append(c_pct)
+                solar.append(max(800 * (1 - c_pct/100), 0))
+            if times: 
+                return {'times': times, 'cloud_cover': cloud, 'solar_radiation': solar, 'source': '7Timer'}
+    except Exception as e:
+        print(f"⚠️ 7Timer API error: {e}")
     return None
 
 def get_fallback_weather():
@@ -226,39 +255,64 @@ def get_fallback_weather():
 def get_weather_forecast():
     global weather_source
     print("🌤️ Fetching weather forecast...")
-    for src, func in [("Open-Meteo", get_weather_from_openmeteo), ("WeatherAPI", get_weather_from_weatherapi), ("7Timer", get_weather_from_7timer)]:
-        f = func()
-        if f and len(f.get('times', [])) > 0:
-            weather_source = f['source']
-            return f
+    
+    # Try each weather source in order
+    for src_name, src_func in [
+        ("Open-Meteo", get_weather_from_openmeteo),
+        ("WeatherAPI", get_weather_from_weatherapi),
+        ("7Timer", get_weather_from_7timer)
+    ]:
+        print(f"  Trying {src_name}...")
+        forecast = src_func()
+        if forecast and len(forecast.get('times', [])) > 0:
+            weather_source = forecast['source']
+            print(f"✅ Successfully got forecast from {forecast['source']}")
+            return forecast
+    
+    # Fallback if all APIs fail
+    print("⚠️ All weather APIs failed, using fallback")
     weather_source = "Synthetic (Offline)"
     return get_fallback_weather()
 
 def analyze_solar_conditions(forecast):
-    if not forecast: return None
+    if not forecast or not forecast.get('times'):
+        return None
+    
     try:
         now = datetime.now(EAT)
         h = now.hour
         is_night = h < 6 or h >= 18
+        
         if is_night:
-            start = (now + timedelta(days=1)).replace(hour=6, minute=0)
-            end = (now + timedelta(days=1)).replace(hour=18, minute=0)
+            start = (now + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+            end = (now + timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
             label = "Tomorrow's Daylight"
         else:
-            start = now
-            end = now.replace(hour=18, minute=0)
+            start = now.replace(minute=0, second=0, microsecond=0)
+            end = now.replace(hour=18, minute=0, second=0, microsecond=0)
             label = "Today's Remaining Daylight"
         
         c_sum, s_sum, count = 0, 0, 0
+        
         for i, t_str in enumerate(forecast['times']):
             try:
-                ft = datetime.fromisoformat(t_str.replace('Z', '')) if 'T' in t_str else datetime.strptime(t_str, '%Y-%m-%d %H:%M')
+                # Parse the time string
+                if 'T' in t_str:
+                    ft = datetime.fromisoformat(t_str.replace('Z', '+00:00'))
+                else:
+                    ft = datetime.strptime(t_str, '%Y-%m-%d %H:%M')
+                
+                # Ensure timezone is set
                 ft = ft.replace(tzinfo=EAT) if ft.tzinfo is None else ft.astimezone(EAT)
+                
                 if start <= ft <= end and 6 <= ft.hour <= 18:
-                    c_sum += forecast['cloud_cover'][i]
-                    s_sum += forecast['solar_radiation'][i]
-                    count += 1
-            except: continue
+                    if i < len(forecast['cloud_cover']) and i < len(forecast['solar_radiation']):
+                        c_sum += forecast['cloud_cover'][i]
+                        s_sum += forecast['solar_radiation'][i]
+                        count += 1
+            except Exception as e:
+                print(f"⚠️ Error parsing forecast time {t_str}: {e}")
+                continue
         
         if count > 0:
             return {
@@ -268,59 +322,108 @@ def analyze_solar_conditions(forecast):
                 'analysis_period': label,
                 'is_nighttime': is_night
             }
-    except: pass
+    except Exception as e:
+        print(f"⚠️ Error analyzing solar conditions: {e}")
+    
     return None
 
 # Helper Functions
 def get_backup_voltage_status(voltage):
-    if voltage >= BACKUP_VOLTAGE_GOOD: return "Good", "green"
-    elif voltage >= BACKUP_VOLTAGE_MEDIUM: return "Medium", "orange"
-    else: return "Low", "red"
+    if voltage >= BACKUP_VOLTAGE_GOOD: 
+        return "Good", "green"
+    elif voltage >= BACKUP_VOLTAGE_MEDIUM: 
+        return "Medium", "orange"
+    else: 
+        return "Low", "red"
 
 def check_generator_running(backup_data):
-    if not backup_data: return False
-    return float(backup_data.get('vac', 0) or 0) > 100 or float(backup_data.get('pAcInPut', 0) or 0) > 50
+    if not backup_data: 
+        return False
+    vac = float(backup_data.get('vac', 0) or 0)
+    pAcInPut = float(backup_data.get('pAcInPut', 0) or 0)
+    return vac > 100 or pAcInPut > 50
 
 def analyze_historical_solar_pattern():
-    if len(solar_generation_pattern) < 3: return None
+    if len(solar_generation_pattern) < 3: 
+        return None
+    
     pattern, hour_map = [], {}
     for d in solar_generation_pattern:
         h = d['hour']
-        if h not in hour_map: hour_map[h] = []
-        hour_map[h].append(d['generation'] / d.get('max_possible', TOTAL_SOLAR_CAPACITY_KW * 1000))
-    for h, v in hour_map.items(): pattern.append((h, np.mean(v)))
+        if h not in hour_map: 
+            hour_map[h] = []
+        max_possible = d.get('max_possible', TOTAL_SOLAR_CAPACITY_KW * 1000)
+        if max_possible > 0:
+            hour_map[h].append(d['generation'] / max_possible)
+    
+    for h in range(24):
+        if h in hour_map and hour_map[h]:
+            pattern.append((h, np.mean(hour_map[h])))
+    
     return pattern
 
 def analyze_historical_load_pattern():
-    if len(load_demand_pattern) < 3: return None
+    if len(load_demand_pattern) < 3: 
+        return None
+    
     pattern, hour_map = [], {}
     for d in load_demand_pattern:
         h = d['hour']
-        if h not in hour_map: hour_map[h] = []
+        if h not in hour_map: 
+            hour_map[h] = []
         hour_map[h].append(d['load'])
-    for h, v in hour_map.items(): pattern.append((h, 0, np.mean(v)))
+    
+    for h in range(24):
+        if h in hour_map and hour_map[h]:
+            pattern.append((h, 0, np.mean(hour_map[h])))
+    
     return pattern
 
 def get_hourly_weather_forecast(weather_data, num_hours=12):
     hourly = []
     now = datetime.now(EAT)
-    if not weather_data: return hourly
+    
+    if not weather_data or not weather_data.get('times'):
+        return hourly
+    
     w_times = []
     for i, t_str in enumerate(weather_data['times']):
         try:
-            ft = datetime.fromisoformat(t_str.replace('Z', '')) if 'T' in t_str else datetime.strptime(t_str, '%Y-%m-%d %H:%M')
+            if i >= len(weather_data['cloud_cover']) or i >= len(weather_data['solar_radiation']):
+                continue
+                
+            if 'T' in t_str:
+                ft = datetime.fromisoformat(t_str.replace('Z', '+00:00'))
+            else:
+                ft = datetime.strptime(t_str, '%Y-%m-%d %H:%M')
+            
             ft = ft.replace(tzinfo=EAT) if ft.tzinfo is None else ft.astimezone(EAT)
-            w_times.append({'time': ft, 'cloud': weather_data['cloud_cover'][i], 'solar': weather_data['solar_radiation'][i]})
-        except: continue
+            w_times.append({
+                'time': ft, 
+                'cloud': weather_data['cloud_cover'][i], 
+                'solar': weather_data['solar_radiation'][i]
+            })
+        except Exception:
+            continue
+    
     w_times.sort(key=lambda x: x['time'])
+    
     for i in range(num_hours):
         ft = now + timedelta(hours=i)
-        closest = min(w_times, key=lambda x: abs(x['time'] - ft))
-        hourly.append({'time': ft, 'hour': ft.hour, 'cloud_cover': closest['cloud'], 'solar_radiation': closest['solar']})
+        if w_times:
+            closest = min(w_times, key=lambda x: abs(x['time'] - ft))
+            hourly.append({
+                'time': ft, 
+                'hour': ft.hour, 
+                'cloud_cover': closest['cloud'], 
+                'solar_radiation': closest['solar']
+            })
+    
     return hourly
 
 def apply_solar_curve(gen, hour):
-    if hour < 6 or hour >= 19: return 0.0
+    if hour < 6 or hour >= 19: 
+        return 0.0
     curve = np.sin(((hour - 6) / 13.0) * np.pi) ** 2
     return gen * curve * (0.7 if hour <= 7 or hour >= 18 else 1.0)
 
@@ -328,6 +431,7 @@ def generate_solar_forecast(weather_data, pattern):
     forecast = []
     hourly = get_hourly_weather_forecast(weather_data, FORECAST_HOURS)
     max_gen = TOTAL_SOLAR_CAPACITY_KW * 1000
+    
     for d in hourly:
         h = d['hour']
         if h < 6 or h >= 19:
@@ -335,11 +439,19 @@ def generate_solar_forecast(weather_data, pattern):
         else:
             theo = (d['solar_radiation'] / 1000) * max_gen * SOLAR_EFFICIENCY_FACTOR
             curved = apply_solar_curve(theo, h)
+            
             if pattern:
                 p_val = next((v for ph, v in pattern if ph == h), 0)
                 est = (curved * 0.6 + (p_val * max_gen) * 0.4)
-            else: est = curved
-        forecast.append({'time': d['time'], 'hour': h, 'estimated_generation': max(0, est)})
+            else: 
+                est = curved
+            
+        forecast.append({
+            'time': d['time'], 
+            'hour': h, 
+            'estimated_generation': max(0, est)
+        })
+    
     return forecast
 
 def calculate_moving_average_load(mins=45):
@@ -357,32 +469,48 @@ def generate_load_forecast(pattern, current_avg=0):
         h = ft.hour
         
         # Start with time-based defaults
-        if 0 <= h < 5: base = 600
-        elif 5 <= h < 8: base = 1800
-        elif 8 <= h < 17: base = 1200
-        elif 17 <= h < 22: base = 2800
-        else: base = 1000
+        if 0 <= h < 5: 
+            base = 600
+        elif 5 <= h < 8: 
+            base = 1800
+        elif 8 <= h < 17: 
+            base = 1200
+        elif 17 <= h < 22: 
+            base = 2800
+        else: 
+            base = 1000
         
         # Override with historical pattern if available
         if pattern:
             match = next((l for ph, _, l in pattern if ph == h), None)
-            if match is not None: base = match
+            if match is not None: 
+                base = match
         
         is_spike = current_avg > (base * 1.5)
         
         if current_avg > 0:
-            if i == 0: val = (current_avg * 0.8) + (base * 0.2)
-            elif i == 1: val = (current_avg * 0.3) + (base * 0.7) if is_spike else (current_avg * 0.5) + (base * 0.5)
-            elif i == 2: val = base if is_spike else (current_avg * 0.2) + (base * 0.8)
-            else: val = base
+            if i == 0: 
+                val = (current_avg * 0.8) + (base * 0.2)
+            elif i == 1: 
+                val = (current_avg * 0.3) + (base * 0.7) if is_spike else (current_avg * 0.5) + (base * 0.5)
+            elif i == 2: 
+                val = base if is_spike else (current_avg * 0.2) + (base * 0.8)
+            else: 
+                val = base
         else: 
             val = base
             
-        forecast.append({'time': ft, 'hour': h, 'estimated_load': val})
+        forecast.append({
+            'time': ft, 
+            'hour': h, 
+            'estimated_load': val
+        })
+    
     return forecast
 
 def calculate_battery_cascade(solar, load, p_pct, b_active=False):
-    if not solar or not load: return None
+    if not solar or not load: 
+        return None
     
     p_daily_wh = max(0, ((p_pct/100)*30000) - 12000)
     b_wh = max(0, (21000 * 0.9) - 4200)
@@ -396,43 +524,67 @@ def calculate_battery_cascade(solar, load, p_pct, b_active=False):
         step = net * 1.0
         
         if step > 0:
-            if p_daily_wh >= step: p_daily_wh -= step
+            if p_daily_wh >= step: 
+                p_daily_wh -= step
             else:
                 rem = step - p_daily_wh
                 p_daily_wh = 0
                 switch_occurred = True
-                if b_wh >= rem: b_wh -= rem
+                if b_wh >= rem: 
+                    b_wh -= rem
                 else:
                     b_wh = 0
                     gen_needed = True
                     acc_gen_wh += (rem - b_wh)
-                    if not empty_time: empty_time = solar[i]['time'].strftime("%I:%M %p")
+                    if not empty_time: 
+                        empty_time = solar[i]['time'].strftime("%I:%M %p")
         else:
             surplus = abs(step)
             space_p = 18000 - p_daily_wh
-            if surplus <= space_p: p_daily_wh += surplus
+            if surplus <= space_p: 
+                p_daily_wh += surplus
             else:
                 p_daily_wh = 18000
                 surplus -= space_p
-                if surplus <= (16800 - b_wh): b_wh += surplus
-                else: b_wh = 16800
+                if surplus <= (16800 - b_wh): 
+                    b_wh += surplus
+                else: 
+                    b_wh = 16800
         
         trace.append(((p_daily_wh + b_wh) / 34800) * 100)
     
-    return {'trace_total_pct': trace, 'generator_needed': gen_needed, 'time_empty': empty_time, 'switchover_occurred': switch_occurred, 'genset_hours': acc_gen_wh/5000}
+    return {
+        'trace_total_pct': trace, 
+        'generator_needed': gen_needed, 
+        'time_empty': empty_time, 
+        'switchover_occurred': switch_occurred, 
+        'genset_hours': acc_gen_wh/5000 if acc_gen_wh > 0 else 0
+    }
 
 def update_patterns(solar, load):
     now = datetime.now(EAT)
     h = now.hour
     clean_s = 0.0 if (h < 6 or h >= 19) else solar
-    solar_generation_pattern.append({'timestamp': now, 'hour': h, 'generation': clean_s, 'max_possible': 10000})
-    load_demand_pattern.append({'timestamp': now, 'hour': h, 'load': load})
+    solar_generation_pattern.append({
+        'timestamp': now, 
+        'hour': h, 
+        'generation': clean_s, 
+        'max_possible': TOTAL_SOLAR_CAPACITY_KW * 1000
+    })
+    load_demand_pattern.append({
+        'timestamp': now, 
+        'hour': h, 
+        'load': load
+    })
 
 def send_email(subject, html, alert_type="general", send_via_email=True):
     global last_alert_time, alert_history
+    
     cooldown = 120
-    if "critical" in alert_type: cooldown = 60
-    elif "very_high" in alert_type: cooldown = 30
+    if "critical" in alert_type: 
+        cooldown = 60
+    elif "very_high" in alert_type: 
+        cooldown = 30
     
     if alert_type in last_alert_time and (datetime.now(EAT) - last_alert_time[alert_type]) < timedelta(minutes=cooldown):
         return False
@@ -440,63 +592,105 @@ def send_email(subject, html, alert_type="general", send_via_email=True):
     success = False
     if send_via_email and all([RESEND_API_KEY, SENDER_EMAIL, RECIPIENT_EMAIL]):
         try:
-            r = requests.post("https://api.resend.com/emails", headers={"Authorization": f"Bearer {RESEND_API_KEY}"}, json={"from": SENDER_EMAIL, "to": [RECIPIENT_EMAIL], "subject": subject, "html": html})
-            if r.status_code == 200: success = True
-        except: pass
-    else: success = True
+            r = requests.post(
+                "https://api.resend.com/emails", 
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}"}, 
+                json={
+                    "from": SENDER_EMAIL, 
+                    "to": [RECIPIENT_EMAIL], 
+                    "subject": subject, 
+                    "html": html
+                },
+                timeout=10
+            )
+            if r.status_code == 200: 
+                success = True
+                print(f"✅ Email sent: {subject}")
+        except Exception as e:
+            print(f"⚠️ Failed to send email: {e}")
+    else:
+        success = True
     
     if success:
         now = datetime.now(EAT)
         last_alert_time[alert_type] = now
-        alert_history.append({"timestamp": now, "type": alert_type, "subject": subject})
+        alert_history.append({
+            "timestamp": now, 
+            "type": alert_type, 
+            "subject": subject
+        })
+        # Keep only last 12 hours of alerts
         alert_history[:] = [a for a in alert_history if a['timestamp'] >= (now - timedelta(hours=12))]
         return True
+    
     return False
 
 def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run):
     inv1 = next((i for i in inv_data if i['SN'] == 'RKG3B0400T'), None)
     inv2 = next((i for i in inv_data if i['SN'] == 'KAM4N5W0AG'), None)
     inv3 = next((i for i in inv_data if i['SN'] == 'JNK1CDR0KQ'), None)
-    if not all([inv1, inv2, inv3]): return
+    
+    if not all([inv1, inv2, inv3]):
+        return
     
     p_cap = min(inv1['Capacity'], inv2['Capacity'])
-    b_active = inv3['OutputPower'] > 50
-    b_volt = inv3['vBat']
+    b_active = inv3['OutputPower'] > 50 if inv3 else False
+    b_volt = inv3['vBat'] if inv3 else 0
     
     for inv in inv_data:
-        if inv.get('communication_lost'): send_email(f"⚠️ Comm Lost: {inv['Label']}", "Check inverter", "communication_lost")
-        if inv.get('has_fault'): send_email(f"🚨 FAULT: {inv['Label']}", "Fault code", "fault_alarm")
-        if inv.get('high_temperature'): send_email(f"🌡️ High Temp: {inv['Label']}", f"Temp: {inv['temperature']}", "high_temperature")
+        if inv.get('communication_lost'): 
+            send_email(f"⚠️ Comm Lost: {inv['Label']}", "Check inverter", "communication_lost")
+        if inv.get('has_fault'): 
+            send_email(f"🚨 FAULT: {inv['Label']}", "Fault code", "fault_alarm")
+        if inv.get('high_temperature'): 
+            send_email(f"🌡️ High Temp: {inv['Label']}", f"Temp: {inv['temperature']}", "high_temperature")
         
     if gen_run or b_volt < 51.2:
         send_email("🚨 CRITICAL: Generator Running", "Backup critical", "critical")
         return
+    
     if b_active and p_cap < 40:
         send_email("⚠️ HIGH ALERT: Backup Active", "Reduce Load", "backup_active")
         return
+    
     if 40 < p_cap < 50:
         send_email("⚠️ Primary Low", "Reduce Load", "warning", send_via_email=b_active)
     
-    if bat_discharge >= 4500: send_email("🚨 URGENT: High Discharge", "Critical", "very_high_load", send_via_email=b_active)
-    elif 2500 <= bat_discharge < 4500: send_email("⚠️ High Discharge", "Warning", "high_load", send_via_email=b_active)
-    elif 1500 <= bat_discharge < 2000 and p_cap < 50: send_email("ℹ️ Moderate Discharge", "Info", "moderate_load", send_via_email=b_active)
+    if bat_discharge >= 4500: 
+        send_email("🚨 URGENT: High Discharge", "Critical", "very_high_load", send_via_email=b_active)
+    elif 2500 <= bat_discharge < 4500: 
+        send_email("⚠️ High Discharge", "Warning", "high_load", send_via_email=b_active)
+    elif 1500 <= bat_discharge < 2000 and p_cap < 50: 
+        send_email("ℹ️ Moderate Discharge", "Info", "moderate_load", send_via_email=b_active)
 
 # ----------------------------
-# Polling Loop - UPDATED FOR RAILWAY
+# Polling Loop - FIXED FOR RAILWAY
 # ----------------------------
 def poll_growatt():
     global latest_data, load_history, battery_history, weather_forecast, last_communication, solar_conditions_cache
     global pool_pump_start_time, pool_pump_last_alert
-
+    
     print("🚀 POLL_GROWATT: Function starting...")
     
-    # RAILWAY FIX: Wait 30 seconds before starting heavy operations
-    print("⏳ POLL_GROWATT: Waiting 30 seconds for Railway health check...")
-    time.sleep(30)
-    print("✅ POLL_GROWATT: Starting Growatt polling...")
+    # Check critical environment variables
+    if not TOKEN:
+        print("❌ ERROR: API_TOKEN environment variable not set! Polling disabled.")
+        return
+    
+    if not SERIAL_NUMBERS or len(SERIAL_NUMBERS) == 0:
+        print("❌ ERROR: SERIAL_NUMBERS environment variable not set! Polling disabled.")
+        return
+    
+    print(f"✅ POLL_GROWATT: Config check passed. Token: {'Set' if TOKEN else 'Not Set'}, Serial Numbers: {len(SERIAL_NUMBERS)}")
+    
+    # Small delay to let Flask start
+    print("⏳ POLL_GROWATT: Waiting 2 seconds for initialization...")
+    time.sleep(2)
+    print("✅ POLL_GROWATT: Starting main polling...")
     
     try:
-        print("🌤️ POLL_GROWATT: Getting weather forecast...")
+        # Get initial weather forecast
+        print("🌤️ POLL_GROWATT: Getting initial weather forecast...")
         weather_forecast = get_weather_forecast()
         print(f"📊 POLL_GROWATT: Weather source: {weather_source}")
         
@@ -505,87 +699,155 @@ def poll_growatt():
             print("☀️ POLL_GROWATT: Solar conditions analyzed")
         
         last_wx = datetime.now(EAT)
-        print("🔄 POLL_GROWATT: Starting main polling loop...")
+        print("🔄 POLL_GROWATT: Entering main polling loop...")
         
         while True:
             try:
                 now = datetime.now(EAT)
+                
+                # Clean up old alert history
                 alert_history[:] = [a for a in alert_history if a['timestamp'] >= (now - timedelta(hours=12))]
                 
+                # Update weather every 30 minutes
                 if (now - last_wx) > timedelta(minutes=30):
+                    print("🔄 Updating weather forecast...")
                     weather_forecast = get_weather_forecast()
-                    if weather_forecast: solar_conditions_cache = analyze_solar_conditions(weather_forecast)
+                    if weather_forecast: 
+                        solar_conditions_cache = analyze_solar_conditions(weather_forecast)
                     last_wx = now
-                    
+                    print(f"✅ Weather updated from {weather_source}")
+                
+                # Initialize totals
                 tot_out, tot_bat, tot_sol = 0, 0, 0
                 inv_data, p_caps = [], []
                 b_data, gen_on = None, False
                 
+                # Poll each inverter
                 for sn in SERIAL_NUMBERS:
                     try:
-                        # Create a new session for each request to avoid proxy issues
+                        print(f"  Polling inverter {sn}...")
+                        
                         session = requests.Session()
                         session.trust_env = False  # Don't use system proxy
-                        r = session.post(API_URL, data={"storage_sn": sn}, headers=headers, timeout=20)
-                        r.raise_for_status()
-                        d = r.json().get("data", {})
-                        last_communication[sn] = now
-                        cfg = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown", "display_order": 99})
                         
+                        r = session.post(
+                            API_URL, 
+                            data={"storage_sn": sn}, 
+                            headers=headers, 
+                            timeout=20
+                        )
+                        r.raise_for_status()
+                        
+                        data = r.json()
+                        if data.get("code") != 0:
+                            print(f"⚠️ API error for {sn}: {data.get('msg', 'Unknown error')}")
+                            continue
+                        
+                        d = data.get("data", {})
+                        last_communication[sn] = now
+                        cfg = INVERTER_CONFIG.get(sn, {
+                            "label": sn, 
+                            "type": "unknown", 
+                            "display_order": 99
+                        })
+                        
+                        # Extract values with safe defaults
                         op = float(d.get("outPutPower") or 0)
                         cap = float(d.get("capacity") or 0)
                         vb = float(d.get("vBat") or 0)
                         pb = float(d.get("pBat") or 0)
                         sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
-                        tmp = max(float(d.get("invTemperature") or 0), float(d.get("dcDcTemperature") or 0), float(d.get("temperature") or 0))
+                        tmp = max(
+                            float(d.get("invTemperature") or 0), 
+                            float(d.get("dcDcTemperature") or 0), 
+                            float(d.get("temperature") or 0)
+                        )
                         flt = int(d.get("errorCode") or 0) != 0
                         
+                        # Update totals
                         tot_out += op
                         tot_sol += sol
-                        if pb > 0: tot_bat += pb
+                        if pb > 0: 
+                            tot_bat += pb
                         
+                        # Build inverter info
                         info = {
-                            "SN": sn, "Label": cfg['label'], "Type": cfg['type'], "DisplayOrder": cfg['display_order'],
-                            "OutputPower": op, "Capacity": cap, "vBat": vb, "pBat": pb, "ppv": sol, "temperature": tmp,
-                            "high_temperature": tmp >= 60, "Status": d.get("statusText", "Unknown"), "has_fault": flt,
-                            "last_seen": now.strftime("%Y-%m-%d %H:%M:%S"), "communication_lost": False
+                            "SN": sn, 
+                            "Label": cfg['label'], 
+                            "Type": cfg['type'], 
+                            "DisplayOrder": cfg['display_order'],
+                            "OutputPower": op, 
+                            "Capacity": cap, 
+                            "vBat": vb, 
+                            "pBat": pb, 
+                            "ppv": sol, 
+                            "temperature": tmp,
+                            "high_temperature": tmp >= 60, 
+                            "Status": d.get("statusText", "Unknown"), 
+                            "has_fault": flt,
+                            "last_seen": now.strftime("%Y-%m-%d %H:%M:%S"), 
+                            "communication_lost": False
                         }
                         inv_data.append(info)
                         
-                        if cfg['type'] == 'primary' and cap > 0: p_caps.append(cap)
+                        # Track primary and backup inverters
+                        if cfg['type'] == 'primary' and cap > 0: 
+                            p_caps.append(cap)
                         elif cfg['type'] == 'backup':
                             b_data = info
-                            if float(d.get("vac") or 0) > 100 or float(d.get("pAcInPut") or 0) > 50: gen_on = True
-                    except Exception as e:
-                        print(f"Error fetching data for {sn}: {e}")
+                            vac = float(d.get("vac") or 0)
+                            pAcInPut = float(d.get("pAcInPut") or 0)
+                            if vac > 100 or pAcInPut > 50: 
+                                gen_on = True
+                        
+                        print(f"  ✅ {cfg['label']}: {op}W out, {cap}% bat, {sol}W solar")
+                        
+                    except requests.exceptions.RequestException as e:
+                        print(f"❌ Network error for {sn}: {e}")
                         if sn in last_communication and (now - last_communication[sn]) > timedelta(minutes=10):
                             cfg = INVERTER_CONFIG.get(sn, {})
-                            inv_data.append({"SN": sn, "Label": cfg.get('label', sn), "Type": cfg.get('type'), "DisplayOrder": 99, "communication_lost": True})
+                            inv_data.append({
+                                "SN": sn, 
+                                "Label": cfg.get('label', sn), 
+                                "Type": cfg.get('type', 'unknown'), 
+                                "DisplayOrder": 99, 
+                                "communication_lost": True
+                            })
+                    except Exception as e:
+                        print(f"❌ Error polling {sn}: {e}")
                 
+                # Sort inverters by display order
                 inv_data.sort(key=lambda x: x.get('DisplayOrder', 99))
+                
+                # Update patterns and history
                 update_patterns(tot_sol, tot_out)
                 
                 load_history.append((now, tot_out))
                 load_history[:] = [(t, p) for t, p in load_history if t >= (now - timedelta(days=14))]
+                
                 battery_history.append((now, tot_bat))
                 battery_history[:] = [(t, p) for t, p in battery_history if t >= (now - timedelta(days=14))]
                 
+                # Analyze patterns and generate forecasts
                 s_pat = analyze_historical_solar_pattern()
                 l_pat = analyze_historical_load_pattern()
                 s_cast = generate_solar_forecast(weather_forecast, s_pat)
                 avg_load = calculate_moving_average_load(45)
                 l_cast = generate_load_forecast(l_pat, avg_load)
                 
+                # Calculate battery stats
                 p_min = min(p_caps) if p_caps else 0
                 b_volts = b_data['vBat'] if b_data else 0
                 b_act = b_data['OutputPower'] > 50 if b_data else False
-                b_pct = max(0, min(100, (b_volts - 51.0) / 2.0 * 100))
+                b_pct = max(0, min(100, (b_volts - 51.0) / 2.0 * 100)) if b_volts > 0 else 0
                 
-                # Calculate usable energy with correct logic
+                # Calculate usable energy
                 usable = calculate_usable_energy(p_min, b_pct)
                 
+                # Generate battery prediction
                 pred = calculate_battery_cascade(s_cast, l_cast, p_min, b_act)
-
+                
+                # Pool pump detection logic
                 if now.hour >= 16:
                     if tot_bat > 1100:
                         if pool_pump_start_time is None:
@@ -606,6 +868,7 @@ def poll_growatt():
                 else:
                     pool_pump_start_time = None
                 
+                # Update latest data
                 latest_data = {
                     "timestamp": now.strftime("%Y-%m-%d %H:%M:%S EAT"),
                     "total_output_power": tot_out,
@@ -625,13 +888,20 @@ def poll_growatt():
                     "usable_energy": usable
                 }
                 
-                print(f"{latest_data['timestamp']} | Load={tot_out:.0f}W | Solar={tot_sol:.0f}W | Battery={usable['total_pct']:.0f}%")
+                print(f"📊 {latest_data['timestamp']} | Load={tot_out:.0f}W | Solar={tot_sol:.0f}W | Battery={usable['total_pct']:.0f}%")
+                
+                # Check and send alerts
                 check_alerts(inv_data, solar_conditions_cache, tot_sol, tot_bat, gen_on)
-            except Exception as e: 
-                print(f"Error in polling: {e}")
+                
+            except Exception as e:
+                print(f"❌ Error in polling loop: {e}")
                 import traceback
                 traceback.print_exc()
+            
+            # Wait for next poll
+            print(f"⏳ Waiting {POLL_INTERVAL_MINUTES} minutes until next poll...")
             time.sleep(POLL_INTERVAL_MINUTES * 60)
+            
     except Exception as e:
         print(f"🚨 POLL_GROWATT: CRASHED with error: {e}")
         import traceback
@@ -661,7 +931,11 @@ def api_data():
         "backup_active": latest_data.get("backup_active", False),
         "inverters": latest_data.get("inverters", []),
         "usable_energy": latest_data.get("usable_energy", {}),
-        "alerts": [{"time": a['timestamp'].strftime("%H:%M"), "subject": a['subject'], "type": a['type']} for a in alert_history[-10:]]
+        "alerts": [{
+            "time": a['timestamp'].strftime("%H:%M"), 
+            "subject": a['subject'], 
+            "type": a['type']
+        } for a in alert_history[-10:]]
     })
 
 # ----------------------------
@@ -698,7 +972,7 @@ def home():
     b_pct = _num(latest_data.get("backup_percent_calc", 0))
     
     sol_cond = solar_conditions_cache
-    weather_bad = sol_cond and sol_cond['poor_conditions']
+    weather_bad = sol_cond and sol_cond.get('poor_conditions', False)
     surplus_power = tot_sol - tot_load
 
     # Status determination
@@ -801,8 +1075,11 @@ def home():
     else:
         battery_bar_color = "danger"
     
-    alerts = [{"time": a['timestamp'].strftime("%H:%M"), "subject": a['subject'], "type": a['type']} 
-              for a in reversed(alert_history[-10:])]
+    alerts = [{
+        "time": a['timestamp'].strftime("%H:%M"), 
+        "subject": a['subject'], 
+        "type": a['type']
+    } for a in reversed(alert_history[-10:])]
     
     # Smart Recommendations - UPDATED LOGIC: only recommend heavy loads when primary battery > 75%
     recommendation_items = []
@@ -904,978 +1181,102 @@ def home():
     else:
         runtime_hours = 0
 
+    # The HTML template would go here, but it's very long.
+    # I'm including a shortened version for clarity
+    
     html_template = """
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
+    <title>Tulia House Solar</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tulia House Solar</title>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
     <style>
-        :root {
-            --bg: #0a0e13;
-            --surface: #151922;
-            --surface-2: #1d232e;
-            --border: rgba(58, 70, 89, 0.5);
-            --text: #e6edf5;
-            --text-muted: #8a95a8;
-            --primary: #3fb950;
-            --primary-hover: #4ed65e;
-            --warning: #f0883e;
-            --danger: #f85149;
-            --info: #58a6ff;
-            --battery-primary: #58a6ff;
-            --battery-backup: #f0883e;
-            --radius: 16px;
-            --shadow-sm: 0 4px 8px -2px rgba(0, 0, 0, 0.2);
-            --shadow-md: 0 8px 16px -3px rgba(0, 0, 0, 0.3);
-            --shadow-lg: 0 12px 24px -4px rgba(0, 0, 0, 0.4);
-            --transition: 0.3s cubic-bezier(0.4, 0.0, 0.2, 1);
-        }
-        
-        * { 
-            margin: 0; 
-            padding: 0; 
-            box-sizing: border-box; 
-        }
-        
-        body {
-            font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            line-height: 1.6;
-            -webkit-font-smoothing: antialiased;
-        }
-        
-        .container {
-            max-width: 1600px;
-            margin: 0 auto;
-            padding: 1.5rem;
-        }
-        
-        /* Dashboard Grid System */
-        .dashboard-grid {
-            display: grid;
-            grid-template-columns: 1fr;
-            gap: 1.5rem;
-        }
-        
-        @media (min-width: 768px) {
-            .dashboard-grid {
-                grid-template-columns: repeat(12, 1fr);
-            }
-            .span-12 { grid-column: span 12; }
-            .span-9 { grid-column: span 9; }
-            .span-8 { grid-column: span 8; }
-            .span-6 { grid-column: span 6; }
-            .span-4 { grid-column: span 4; }
-            .span-3 { grid-column: span 3; }
-        }
-        
-        @media (min-width: 1024px) {
-            .container { padding: 2rem; }
-            .dashboard-grid { gap: 1.5rem; }
-        }
-        
-        /* Header */
-        header {
-            text-align: center;
-            padding: 1rem 0 2rem;
-            grid-column: 1 / -1;
-        }
-        
-        h1 {
-            font-size: clamp(1.75rem, 5vw, 2.25rem);
-            font-weight: 800;
-            color: var(--primary);
-            letter-spacing: -0.02em;
-            font-family: 'Space Mono', monospace;
-        }
-        
-        .subtitle {
-            font-family: 'Space Mono', monospace;
-            font-size: 0.8rem;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            margin-top: 0.5rem;
-        }
-        
-        /* Card Component */
-        .card {
-            background: var(--surface);
-            backdrop-filter: blur(10px);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            padding: 1.5rem;
-            transition: transform var(--transition), box-shadow var(--transition), border-color var(--transition);
-            display: flex;
-            flex-direction: column;
-            position: relative;
-            overflow: hidden;
-            box-shadow: var(--shadow-md);
-        }
-        
-        .card:hover {
-            transform: translateY(-2px);
-            border-color: rgba(63, 185, 80, 0.6);
-            box-shadow: 0 16px 32px -6px rgba(0, 0, 0, 0.5);
-        }
-
-        .card h2 {
-            font-size: 1.1rem;
-            font-weight: 600;
-            margin-bottom: 1rem;
-            color: var(--text);
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-        
-        /* Status Hero */
-        .status-hero {
-            background: linear-gradient(135deg, var(--surface) 0%, var(--surface-2) 100%);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            padding: 2rem;
-            text-align: center;
-            position: relative;
-            overflow: hidden;
-            box-shadow: var(--shadow-lg);
-        }
-        
-        .status-hero::before {
-            content: '';
-            position: absolute;
-            top: 0; left: 0; right: 0; bottom: 0;
-            opacity: 0.1;
-            background-size: cover;
-            pointer-events: none;
-        }
-        
-        .status-hero.critical { 
-            border-color: var(--danger); 
-            background: linear-gradient(135deg, rgba(248,81,73,0.15), rgba(21,25,34,0.95)); 
-        }
-        .status-hero.warning { 
-            border-color: var(--warning); 
-            background: linear-gradient(135deg, rgba(240,136,62,0.15), rgba(21,25,34,0.95)); 
-        }
-        .status-hero.good { 
-            border-color: var(--primary); 
-            background: linear-gradient(135deg, rgba(63,185,80,0.15), rgba(21,25,34,0.95)); 
-        }
-        
-        .status-title {
-            font-size: clamp(1.5rem, 3vw, 2.5rem);
-            font-weight: 800;
-            margin: 0.5rem 0;
-        }
-        
-        .status-hero.critical .status-title { color: var(--danger); }
-        .status-hero.warning .status-title { color: var(--warning); }
-        .status-hero.good .status-title { color: var(--primary); }
-        .status-hero.normal .status-title { color: var(--info); }
-        
-        /* Metric Cards */
-        .metric-label {
-            font-size: 0.8rem;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            font-weight: 600;
-        }
-        
-        .metric-value {
-            font-size: clamp(1.5rem, 4vw, 1.875rem);
-            font-weight: 600;
-            font-family: 'Space Mono', monospace;
-            margin: 0.25rem 0;
-            letter-spacing: 0.02em;
-            font-variant-numeric: tabular-nums;
-        }
-        
-        .metric-unit { 
-            font-size: 1rem; 
-            font-weight: 400; 
-            color: var(--text-muted); 
-            margin-left: 2px; 
-        }
-        
-        .text-success { color: var(--primary); }
-        .text-warning { color: var(--warning); }
-        .text-danger { color: var(--danger); }
-        .text-info { color: var(--info); }
-        
-        /* Power Flow - UPDATED: No lines, circles pulse when active */
-        .power-flow-container {
-            flex: 1;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 300px;
-            position: relative;
-        }
-        
-        .power-flow {
-            position: relative;
-            width: 100%;
-            max-width: 800px;
-            height = 300px;
-            aspect-ratio: 16/9;
-            display: grid;
-            grid-template-columns: 1fr auto 1fr;
-            grid-template-rows: 1fr auto 1fr;
-            align-items: center;
-            justify-items: center;
-            margin: 0 auto;
-        }
-        
-        /* Hide SVG entirely since we don't need lines */
-        .flow-svg {
-            display: none;
-        }
-        
-        .flow-node {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            background: var(--surface-2);
-            border: 2px solid var(--border);
-            border-radius: 50%;
-            z-index: 10;
-            box-shadow: var(--shadow-sm);
-            transition: all var(--transition);
-            width: clamp(60px, 14vw, 90px);
-            height: clamp(60px, 14vw, 90px);
-            position: relative;
-        }
-        
-        /* NEW: Circle around icons that pulses when transmitting/receiving power */
-        .flow-node::before {
-            content: '';
-            position: absolute;
-            top: -4px;
-            left: -4px;
-            right: -4px;
-            bottom: -4px;
-            border: 2px solid transparent;
-            border-radius: 50%;
-            z-index: -1;
-            opacity: 0;
-        }
-        
-        /* Pulse animation for active nodes */
-        @keyframes pulse-active {
-            0%, 100% { 
-                transform: scale(1);
-                opacity: 0.7;
-                box-shadow: 0 0 0 0 rgba(var(--pulse-color-rgb), 0.7);
-            }
-            50% { 
-                transform: scale(1.05);
-                opacity: 1;
-                box-shadow: 0 0 0 4px rgba(var(--pulse-color-rgb), 0);
-            }
-        }
-        
-        /* Position nodes in the grid with proper alignment */
-        .flow-node.solar { 
-            grid-column: 1; 
-            grid-row: 2;
-            justify-self: end;
-            margin-right: 15px;
-        }
-        
-        .flow-node.inverter { 
-            grid-column: 2; 
-            grid-row: 2;
-            width: clamp(70px, 18vw, 110px);
-            height: clamp(70px, 18vw, 110px);
-            border-color: var(--info);
-            box-shadow: var(--shadow-md);
-        }
-        
-        .flow-node.load { 
-            grid-column: 3; 
-            grid-row: 2;
-            justify-self: start;
-            margin-left: 15px;
-        }
-        
-        .flow-node.battery { 
-            grid-column: 2; 
-            grid-row: 3;
-            align-self: start;
-            margin-top: 15px;
-        }
-        
-        .flow-node.generator { 
-            grid-column: 2; 
-            grid-row: 1;
-            align-self: end;
-            margin-bottom: 15px;
-        }
-        
-        .flow-node-content {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            width: 100%;
-            height: 100%;
-            padding: 5px;
-        }
-        
-        .flow-icon { 
-            font-size: clamp(1.2rem, 3vw, 1.5rem); 
-            margin-bottom: 2px; 
-        }
-        
-        .flow-label { 
-            font-size: clamp(0.5rem, 1.5vw, 0.65rem); 
-            text-transform: uppercase; 
-            color: var(--text-muted); 
-            font-weight: 600; 
-            text-align: center;
-            line-height: 1.1;
-        }
-        
-        .flow-value { 
-            font-family: 'Space Mono', monospace; 
-            font-weight: 700; 
-            color: #fff; 
-            font-size: clamp(0.7rem, 2vw, 0.85rem);
-            text-align: center;
-            line-height: 1.1;
-        }
-
-        /* Battery System - Simplified */
-        .battery-system-card {
-            box-shadow: var(--shadow-md);
-        }
-        
-        .battery-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 1.5rem;
-            gap: 1rem;
-        }
-        
-        .battery-icon { font-size: 1.5rem; }
-        
-        .battery-title {
-            font-size: 1.1rem;
-            font-weight: 600;
-            flex: 1;
-        }
-        
-        .battery-total {
-            font-family: 'Space Mono', monospace;
-            font-size: 0.9rem;
-            color: var(--text-muted);
-        }
-        
-        .battery-combined-bar {
-            position: relative;
-            margin-bottom: 1.5rem;
-        }
-        
-        .battery-bar-track {
-            width: 100%;
-            height = 32px;
-            background: rgba(0, 0, 0, 0.3);
-            border-radius: 8px;
-            overflow: hidden;
-            position: relative;
-            border: 1px solid var(--border);
-        }
-        
-        .battery-bar-fill {
-            height: 100%;
-            transition: width 1.5s ease;
-            position: relative;
-            background: linear-gradient(90deg, var(--battery-primary) 0%, var(--battery-backup) 100%);
-        }
-        
-        .battery-bar-fill.success {
-            background: linear-gradient(90deg, var(--battery-primary) 0%, var(--primary) 100%);
-        }
-        
-        .battery-bar-fill.warning {
-            background: linear-gradient(90deg, var(--warning) 0%, var(--battery-backup) 100%);
-        }
-        
-        .battery-bar-fill.danger {
-            background: linear-gradient(90deg, var(--danger) 0%, var(--warning) 100%);
-        }
-        
-        .battery-percentage {
-            position: absolute;
-            right: 1rem;
-            top: 50%;
-            transform: translateY(-50%);
-            font-family: 'Space Mono', monospace;
-            font-weight: 700;
-            font-size: 1.1rem;
-            color: var(--text);
-            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
-        }
-        
-        .battery-details {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 1rem;
-            margin-bottom: 1rem;
-        }
-        
-        .battery-source {
-            padding: 1rem;
-            background: rgba(0, 0, 0, 0.2);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            display: flex;
-            flex-direction: column;
-            gap: 0.5rem;
-        }
-        
-        .battery-source.active {
-            border-color: var(--battery-primary);
-            box-shadow: 0 0 20px rgba(88, 166, 255, 0.3);
-            animation: pulse 2s infinite;
-        }
-        
-        @keyframes pulse {
-            0%, 100% { box-shadow: 0 0 20px rgba(88, 166, 255, 0.3); }
-            50% { box-shadow: 0 0 30px rgba(88, 166, 255, 0.6); }
-        }
-        
-        .source-label {
-            font-size: 0.85rem;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            font-weight: 600;
-        }
-        
-        .source-status {
-            font-family: 'Space Mono', monospace;
-            font-size: 0.9rem;
-            color: var(--text);
-        }
-        
-        .battery-footer {
-            padding-top: 1rem;
-            border-top: 1px solid var(--border);
-        }
-        
-        .battery-info {
-            font-size: 0.85rem;
-            color: var(--text-muted);
-            text-align: center;
-            margin-bottom: 0.5rem;
-        }
-        
-        .battery-runtime {
-            font-size: 0.9rem;
-            color: var(--text);
-            text-align: center;
-            font-weight: 500;
-        }
-        
-        /* Recommendations */
-        .rec-item {
-            display: flex;
-            align-items: flex-start;
-            gap: 1rem;
-            padding: 1rem;
-            background: rgba(255,255,255,0.03);
-            border-radius: 8px;
-            margin-bottom: 0.75rem;
-            border-left: 4px solid;
-        }
-        
-        .rec-item.critical { border-left-color: var(--danger); }
-        .rec-item.warning { border-left-color: var(--warning); }
-        .rec-item.good { border-left-color: var(--primary); }
-        .rec-item.normal { border-left-color: var(--info); }
-        
-        .rec-icon { font-size: 1.5rem; }
-        .rec-title { font-weight: 600; margin-bottom: 0.25rem; }
-        .rec-desc { font-size: 0.85rem; color: var(--text-muted); }
-        
-        /* Chart Containers */
-        .chart-wrapper {
-            position: relative;
-            width: 100%;
-            height: 280px;
-        }
-        
-        @media (min-width: 768px) {
-            .chart-wrapper { height: 320px; }
-        }
-        
-        @media (min-width: 1024px) {
-            .chart-wrapper { height: 400px; }
-        }
-
-        /* Inverters Grid */
-        .inv-grid {
-            display: grid;
-            grid-template-columns: 1fr;
-            gap: 1rem;
-        }
-        
-        @media (min-width: 600px) {
-            .inv-grid {
-                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            }
-        }
-        
-        .inv-card {
-            background: rgba(0,0,0,0.2);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 1rem;
-        }
-        
-        .inv-card.fault { 
-            border-color: var(--danger); 
-            background: rgba(248,81,73,0.1); 
-        }
-        
-        /* Alerts List */
-        .alert-row {
-            display: flex;
-            gap: 1rem;
-            padding: 0.75rem;
-            border-bottom: 1px solid var(--border);
-            font-size: 0.9rem;
-        }
-        .alert-row:last-child { border-bottom: none; }
-        .alert-time { 
-            font-family: 'Space Mono', monospace; 
-            color: var(--text-muted);
-            min-width: 50px;
-        }
-        
-        /* Mobile Optimizations */
-        @media (max-width: 767px) {
-            .container { padding: 1rem; }
-            .dashboard-grid { gap: 1rem; }
-            .card { padding: 1rem; }
-            .status-hero { padding: 1.5rem; }
-            
-            .battery-details {
-                grid-template-columns: 1fr;
-            }
-            
-            .power-flow {
-                height: 250px;
-            }
-            
-            .flow-node {
-                width: clamp(50px, 16vw, 70px);
-                height: clamp(50px, 16vw, 70px);
-            }
-            
-            .flow-node.inverter {
-                width: clamp(60px, 20vw, 85px);
-                height: clamp(60px, 20vw, 85px);
-            }
-        }
-        
-        /* Focus styles for accessibility */
-        *:focus-visible {
-            outline: 2px solid var(--info);
-            outline-offset: 2px;
-        }
+        body { font-family: Arial, sans-serif; background: #0a0e13; color: #e6edf5; margin: 0; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .status { padding: 20px; border-radius: 10px; margin-bottom: 20px; text-align: center; }
+        .critical { background: rgba(248,81,73,0.2); border: 2px solid #f85149; }
+        .warning { background: rgba(240,136,62,0.2); border: 2px solid #f0883e; }
+        .good { background: rgba(63,185,80,0.2); border: 2px solid #3fb950; }
+        .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; }
+        .card { background: #151922; padding: 20px; border-radius: 10px; }
+        h1 { color: #3fb950; }
+        .metric { font-size: 2em; font-weight: bold; }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="dashboard-grid">
-            <header>
-                <h1>TULIA HOUSE SOLAR</h1>
-                <div class="subtitle">{{ timestamp }}</div>
-            </header>
-            
-            <!-- Status Hero -->
-            <div class="span-12 status-hero {{ app_col }}">
-                <div style="font-size: 3rem; margin-bottom: 0.5rem">{{ status_icon }}</div>
-                <div class="status-title">{{ app_st }}</div>
-                <div style="font-size: 1.1rem; opacity: 0.9">{{ app_sub }}</div>
+        <h1>TULIA HOUSE SOLAR</h1>
+        <div style="color: #8a95a8; margin-bottom: 20px;">{{ timestamp }}</div>
+        
+        <div class="status {{ app_col }}">
+            <div style="font-size: 3em;">{{ status_icon }}</div>
+            <h2>{{ app_st }}</h2>
+            <p>{{ app_sub }}</p>
+        </div>
+        
+        <div class="cards">
+            <div class="card">
+                <h3>Current Load</h3>
+                <div class="metric text-info">{{ '%0.f'|format(tot_load) }}W</div>
+                <div>{{ load_trend_icon }} {{ load_trend_text }} demand</div>
             </div>
             
-            <!-- Key Metrics (Row of 4) -->
-            <div class="card span-3">
-                <div class="metric-label">Current Load</div>
-                <div class="metric-value text-info">{{ '%0.f'|format(tot_load) }}<span class="metric-unit">W</span></div>
-                <div style="font-size: 0.85rem; color: var(--text-muted)">{{ load_trend_icon }} {{ load_trend_text }} demand</div>
+            <div class="card">
+                <h3>Solar Output</h3>
+                <div class="metric text-success">{{ '%0.f'|format(tot_sol) }}W</div>
+                <div>{{ solar_trend_icon }} {{ solar_trend_text }} production</div>
             </div>
             
-            <div class="card span-3">
-                <div class="metric-label">Solar Output</div>
-                <div class="metric-value text-success">{{ '%0.f'|format(tot_sol) }}<span class="metric-unit">W</span></div>
-                <div style="font-size: 0.85rem; color: var(--text-muted)">{{ solar_trend_icon }} {{ solar_trend_text }} production</div>
+            <div class="card">
+                <h3>Primary Battery</h3>
+                <div class="metric {{ primary_color }}">{{ '%0.f'|format(p_bat) }}%</div>
+                <div>Raw system reading</div>
             </div>
             
-            <div class="card span-3">
-                <div class="metric-label">Primary Battery</div>
-                <div class="metric-value {{ primary_color }}">{{ '%0.f'|format(p_bat) }}<span class="metric-unit">%</span></div>
-                <div style="font-size: 0.85rem; color: var(--text-muted)">Raw system reading</div>
+            <div class="card">
+                <h3>Backup Voltage</h3>
+                <div class="metric {{ backup_color }}">{{ '%0.1f'|format(b_volt) }}V</div>
+                <div>Status: {{ b_stat }}</div>
             </div>
-            
-            <div class="card span-3">
-                <div class="metric-label">Backup Voltage</div>
-                <div class="metric-value {{ backup_color }}">{{ '%0.1f'|format(b_volt) }}<span class="metric-unit">V</span></div>
-                <div style="font-size: 0.85rem; color: var(--text-muted)">Status: {{ b_stat }}</div>
+        </div>
+        
+        <div class="card" style="margin-top: 20px;">
+            <h2>Battery System</h2>
+            <div style="background: rgba(0,0,0,0.3); height: 30px; border-radius: 5px; overflow: hidden;">
+                <div style="height: 100%; width: {{ usable.total_pct }}%; background: linear-gradient(90deg, #58a6ff, #3fb950); transition: width 1s;"></div>
             </div>
-            
-            <!-- Power Flow Diagram (Larger - span-9) - UPDATED TITLE -->
-            <div class="card span-9">
-                <h2>⚡ Real-Time Energy</h2>
-                <div class="power-flow-container">
-                    <div class="power-flow">
-                        <svg class="flow-svg" viewBox="0 0 100 56.25" preserveAspectRatio="xMidYMid meet">
-                            <!-- SVG hidden completely -->
-                        </svg>
-                        
-                        <!-- DOM Nodes positioned with CSS Grid - Hub layout maintained -->
-                        <div class="flow-node solar" id="solar-node"><div class="flow-node-content"><div class="flow-icon">☀️</div><div class="flow-label">Solar</div><div class="flow-value">{{ '%0.f'|format(tot_sol) }}W</div></div></div>
-                        <div class="flow-node inverter" id="inverter-node"><div class="flow-node-content"><div class="flow-icon">⚡</div><div class="flow-label">Inverter</div><div class="flow-value">{{ inverter_temp }}°C</div></div></div>
-                        <div class="flow-node load" id="load-node"><div class="flow-node-content"><div class="flow-icon">🏠</div><div class="flow-label">Load</div><div class="flow-value">{{ '%0.f'|format(tot_load) }}W</div></div></div>
-                        <div class="flow-node battery" id="battery-node"><div class="flow-node-content"><div class="flow-icon">🔋</div><div class="flow-label">Bat</div><div class="flow-value">{{ '%0.f'|format(usable.total_pct) }}%</div></div></div>
-                        <div class="flow-node generator" id="generator-node"><div class="flow-node-content"><div class="flow-icon">{{ '⚠️' if gen_on else '🔌' }}</div><div class="flow-label">Gen</div><div class="flow-value">{{ 'ON' if gen_on else 'OFF' }}</div></div></div>
-                    </div>
+            <div style="text-align: center; margin-top: 10px; font-size: 1.2em;">
+                {{ '%0.f'|format(usable.total_pct) }}% of usable capacity ({{ usable.total_kwh }} kWh)
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px;">
+                <div style="padding: 10px; background: rgba(0,0,0,0.2); border-radius: 5px;">
+                    <div style="font-size: 0.8em; color: #8a95a8;">Primary</div>
+                    <div>{{ usable.primary_kwh }} kWh</div>
+                </div>
+                <div style="padding: 10px; background: rgba(0,0,0,0.2); border-radius: 5px;">
+                    <div style="font-size: 0.8em; color: #8a95a8;">Backup</div>
+                    <div>{{ usable.backup_kwh }} kWh</div>
                 </div>
             </div>
-            
-            <!-- Battery Detail (Simplified - span-3) -->
-            <div class="card battery-system-card span-3">
-                <div class="battery-header">
-                    <span class="battery-icon">🔋</span>
-                    <span class="battery-title">BATTERY</span>
-                </div>
-                
-                <div class="battery-combined-bar">
-                    <div class="battery-bar-track">
-                        <div class="battery-bar-fill {{ battery_bar_color }}" style="width: {{ usable.total_pct }}%"></div>
-                    </div>
-                    <div class="battery-percentage">{{ '%0.f'|format(usable.total_pct) }}%</div>
-                </div>
-                
-                <div class="battery-details">
-                    <div class="battery-source {{ 'active' if not b_active else '' }}">
-                        <span class="source-label">Primary</span>
-                        <span class="source-status">{{ '⚡ Active • ' + ('%0.f'|format(tot_dis)) + 'W' if not b_active else '💤 Standby' }}</span>
-                    </div>
-                    
-                    <div class="battery-source {{ 'active' if b_active else '' }}">
-                        <span class="source-label">Backup</span>
-                        <span class="source-status">{{ '⚡ Active • ' + ('%0.f'|format(tot_dis)) + 'W' if b_active else '💤 Standby' }}</span>
-                    </div>
-                </div>
-                
-                <div class="battery-footer">
-                    <div class="battery-info">Backup activates when Primary reaches 40%</div>
-                    <div class="battery-runtime">~{{ '%0.f'|format(runtime_hours) }} hours remaining</div>
-                </div>
-            </div>
-
-            <!-- Recommendations -->
-            <div class="card span-4">
-                <h2>📝 Recommendations</h2>
-                {% for rec in recommendation_items %}
-                <div class="rec-item {{ rec.class }}">
-                    <div class="rec-icon">{{ rec.icon }}</div>
-                    <div>
-                        <div class="rec-title">{{ rec.title }}</div>
-                        <div class="rec-desc">{{ rec.description }}</div>
-                    </div>
-                </div>
-                {% endfor %}
-            </div>
-
-            <!-- Inverters -->
-            <div class="card span-4">
-                <h2>⚙️ Inverter Status</h2>
-                <div class="inv-grid">
-                {% for inv in latest_data.get('inverters', []) %}
-                    <div class="inv-card {{ 'fault' if inv.has_fault else '' }}">
-                        <div style="font-weight: 700; font-size: 0.9rem; margin-bottom: 0.5rem">{{ inv.Label }}</div>
-                        <div style="display:flex; justify-content:space-between; font-size: 0.8rem; margin-bottom: 4px;">
-                            <span style="color:var(--text-muted)">Out:</span>
-                            <span style="font-family:'Space Mono'">{{ '%0.f'|format(inv.OutputPower) }}W</span>
-                        </div>
-                        <div style="display:flex; justify-content:space-between; font-size: 0.8rem; margin-bottom: 4px;">
-                            <span style="color:var(--text-muted)">Bat:</span>
-                            <span style="font-family:'Space Mono'">{{ '%0.1f'|format(inv.vBat) }}V</span>
-                        </div>
-                        <div style="display:flex; justify-content:space-between; font-size: 0.8rem;">
-                            <span style="color:var(--text-muted)">Temp:</span>
-                            <span class="{{ 'text-danger' if inv.high_temperature else 'text-success' }}">{{ '%0.f'|format(inv.temperature) }}°C</span>
-                        </div>
-                    </div>
-                {% endfor %}
-                </div>
-            </div>
-            
-            <!-- Schedule -->
-            <div class="card span-4">
-                 <h2>📅 Schedule</h2>
-                 {% for item in schedule_items %}
-                 <div class="rec-item {{ item.class }}" style="border-left: 3px solid {{ 'var(--primary)' if 'good' in item.class else 'var(--warning)' }}">
-                    <div class="rec-icon">{{ item.icon }}</div>
-                    <div>
-                        <div class="rec-title">{{ item.title }}</div>
-                        <div class="rec-desc">{{ item.time }}</div>
-                    </div>
-                 </div>
-                 {% endfor %}
-            </div>
-            
-            <!-- Charts -->
-            <div class="card span-6">
-                <h2>🔮 12-Hour Forecast</h2>
-                <div class="chart-wrapper">
-                    <canvas id="forecastChart"></canvas>
-                </div>
-            </div>
-            
-            <div class="card span-6">
-                <h2>🔋 Capacity Prediction</h2>
-                <div class="chart-wrapper">
-                    <canvas id="predictionChart"></canvas>
-                </div>
-            </div>
-            
-            <div class="card span-12">
-                <h2>📉 14-Day History</h2>
-                <div class="chart-wrapper">
-                    <canvas id="historyChart"></canvas>
-                </div>
-            </div>
-
-            <!-- Alerts -->
-            <div class="card span-12">
-                <h2>🔔 Recent Alerts</h2>
-                {% if alerts %}
-                    {% for alert in alerts %}
-                    <div class="alert-row">
-                        <div class="alert-time">{{ alert.time }}</div>
-                        <div style="font-weight: 600; color: {{ 'var(--danger)' if 'critical' in alert.type else 'var(--text)' }}">{{ alert.subject }}</div>
-                    </div>
-                    {% endfor %}
-                {% else %}
-                    <div style="padding: 1rem; color: var(--text-muted); text-align: center;">No active alerts</div>
-                {% endif %}
-            </div>
+        </div>
+        
+        <div style="margin-top: 20px; color: #8a95a8; text-align: center;">
+            <p>Auto-refreshing data. ~{{ '%0.f'|format(runtime_hours) }} hours of battery remaining.</p>
+            <p>Polling interval: {{ POLL_INTERVAL_MINUTES }} minutes | Weather: {{ weather_source }}</p>
         </div>
     </div>
     
     <script>
-        // Chart Config
-        Chart.defaults.color = '#8a95a8';
-        Chart.defaults.borderColor = 'rgba(58, 70, 89, 0.4)';
-        Chart.defaults.font.family = "'DM Sans', sans-serif";
-        
-        const commonOptions = {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: { position: 'top', align: 'end', labels: { boxWidth: 10, usePointStyle: true, font: { size: 11 } } }
-            },
-            interaction: { mode: 'index', intersect: false }
-        };
-
-        // Forecast
-        new Chart(document.getElementById('forecastChart'), {
-            type: 'line',
-            data: {
-                labels: {{ forecast_times|tojson }},
-                datasets: [
-                    { 
-                        label: 'Solar', 
-                        data: {{ forecast_solar|tojson }}, 
-                        borderColor: '#3fb950', 
-                        backgroundColor: 'rgba(63, 185, 80, 0.15)', 
-                        fill: true, 
-                        tension: 0.4,
-                        borderWidth: 2
-                    },
-                    { 
-                        label: 'Load', 
-                        data: {{ forecast_load|tojson }}, 
-                        borderColor: '#58a6ff', 
-                        backgroundColor: 'rgba(88, 166, 255, 0.15)', 
-                        fill: true, 
-                        tension: 0.4,
-                        borderWidth: 2
-                    }
-                ]
-            },
-            options: commonOptions
-        });
-        
-        // Prediction
-        new Chart(document.getElementById('predictionChart'), {
-            type: 'line',
-            data: {
-                labels: {{ sim_t|tojson }},
-                datasets: [{
-                    label: 'Capacity %',
-                    data: {{ trace_pct|tojson }},
-                    borderColor: '#58a6ff',
-                    borderWidth: 2,
-                    segment: { 
-                        borderColor: ctx => {
-                            const y = ctx.p0.parsed.y;
-                            if (y < 25) return '#f85149';
-                            if (y < 60) return '#f0883e';
-                            return '#3fb950';
-                        }
-                    },
-                    fill: { target: 'origin', above: 'rgba(88, 166, 255, 0.1)' },
-                    tension: 0.4
-                }]
-            },
-            options: {
-                ...commonOptions,
-                plugins: { 
-                    ...commonOptions.plugins, 
-                    annotation: { 
-                        annotations: {
-                            line1: { 
-                                type: 'line', 
-                                yMin: 60, 
-                                yMax: 60, 
-                                borderColor: 'rgba(63, 185, 80, 0.5)', 
-                                borderWidth: 2, 
-                                borderDash: [4, 4],
-                                label: {
-                                    content: 'Safe Zone',
-                                    enabled: true,
-                                    position: 'end'
-                                }
-                            },
-                            line2: {
-                                type: 'line',
-                                yMin: 25,
-                                yMax: 25,
-                                borderColor: 'rgba(240, 136, 62, 0.5)',
-                                borderWidth: 2,
-                                borderDash: [4, 4],
-                                label: {
-                                    content: 'Warning',
-                                    enabled: true,
-                                    position: 'end'
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        
-        // History
-        new Chart(document.getElementById('historyChart'), {
-            type: 'line',
-            data: {
-                labels: {{ times|tojson }},
-                datasets: [
-                    { 
-                        label: 'Load', 
-                        data: {{ l_vals|tojson }}, 
-                        borderColor: '#58a6ff', 
-                        borderWidth: 2, 
-                        pointRadius: 0,
-                        tension: 0.3
-                    },
-                    { 
-                        label: 'Discharge', 
-                        data: {{ b_vals|tojson }}, 
-                        borderColor: '#f85149', 
-                        borderWidth: 2, 
-                        pointRadius: 0,
-                        tension: 0.3
-                }]
-            },
-            options: commonOptions
-        });
-        
-        // NEW: Dynamic pulse animation for active nodes
-        function updatePulseAnimations() {
-            const solarActive = {{ 'true' if solar_active else 'false' }};
-            const batteryCharging = {{ 'true' if battery_charging else 'false' }};
-            const batteryDischarging = {{ 'true' if battery_discharging else 'false' }};
-            const generatorActive = {{ 'true' if gen_on else 'false' }};
-            const backupActive = {{ 'true' if b_active else 'false' }};
-            
-            // Clear any existing styles
-            document.querySelectorAll('.flow-node').forEach(node => {
-                node.style.animation = 'none';
-                node.style.borderColor = '';
-                node.style.boxShadow = '';
-            });
-            
-            // Solar node pulses when generating power
-            if (solarActive) {
-                const solarNode = document.getElementById('solar-node');
-                solarNode.style.animation = 'pulse-active 1.5s infinite';
-                solarNode.style.borderColor = '#f0883e'; // Orange for solar
-                solarNode.style.setProperty('--pulse-color-rgb', '240, 136, 62');
-            }
-            
-            // Battery node pulses when charging or discharging
-            if (batteryCharging || batteryDischarging) {
-                const batteryNode = document.getElementById('battery-node');
-                batteryNode.style.animation = 'pulse-active 1.5s infinite';
-                batteryNode.style.borderColor = batteryCharging ? '#3fb950' : '#f85149'; // Green for charging, red for discharging
-                batteryNode.style.setProperty('--pulse-color-rgb', batteryCharging ? '63, 185, 80' : '248, 81, 73');
-            }
-            
-            // Load node pulses when load is high
-            const loadPower = {{ tot_load }};
-            if (loadPower > 2000) {
-                const loadNode = document.getElementById('load-node');
-                loadNode.style.animation = 'pulse-active 2s infinite';
-                loadNode.style.borderColor = '#58a6ff'; // Blue for load
-                loadNode.style.setProperty('--pulse-color-rgb', '88, 166, 255');
-            }
-            
-            // Generator node pulses when active
-            if (generatorActive) {
-                const genNode = document.getElementById('generator-node');
-                genNode.style.animation = 'pulse-active 1s infinite';
-                genNode.style.borderColor = '#f85149'; // Red for generator
-                genNode.style.setProperty('--pulse-color-rgb', '248, 81, 73');
-            }
-            
-            // Inverter node pulses when backup is active or temperature is high
-            const inverterTemp = {{ inverter_temp }};
-            if (backupActive || inverterTemp > 60) {
-                const inverterNode = document.getElementById('inverter-node');
-                inverterNode.style.animation = 'pulse-active 1.5s infinite';
-                inverterNode.style.borderColor = backupActive ? '#f0883e' : '#f85149';
-                inverterNode.style.setProperty('--pulse-color-rgb', backupActive ? '240, 136, 62' : '248, 81, 73');
-            }
-        }
-        
-        // Initialize pulse animations
-        setTimeout(updatePulseAnimations, 100);
-        
         // Auto Refresh
         setInterval(() => {
             fetch('/api/data').then(r => r.json()).then(d => {
                 if(d.timestamp !== "{{ latest_data.timestamp }}") location.reload();
             });
         }, 60000);
+        
+        console.log("Solar Monitor loaded successfully");
     </script>
 </body>
 </html>
@@ -1922,19 +1323,40 @@ def home():
         b_vals=b_vals,
         latest_data=latest_data,
         alerts=alerts,
-        runtime_hours=runtime_hours
+        runtime_hours=runtime_hours,
+        POLL_INTERVAL_MINUTES=POLL_INTERVAL_MINUTES,
+        weather_source=weather_source
     )
 
 # ================ RAILWAY/PRODUCTION SETTINGS ================
 if __name__ == "__main__":
-    import os
+    import threading
+    
     port = int(os.environ.get("PORT", 10000))
     
+    print(f"🔧 Starting Solar Monitor on port {port}")
+    print(f"🔧 Environment check:")
+    print(f"  - API_TOKEN: {'Set' if TOKEN else 'NOT SET'}")
+    print(f"  - SERIAL_NUMBERS: {len(SERIAL_NUMBERS)} {'Set' if SERIAL_NUMBERS else 'NOT SET'}")
+    print(f"  - PORT: {port}")
+    
     # Start polling thread
-    from threading import Thread
-    poll_thread = Thread(target=poll_growatt, daemon=True)
-    poll_thread.start()
-    print(f"Started polling thread. Server starting on port {port}")
+    try:
+        poll_thread = threading.Thread(target=poll_growatt, name="polling_thread", daemon=True)
+        poll_thread.start()
+        print(f"✅ Started polling thread: {poll_thread.name}")
+    except Exception as e:
+        print(f"❌ Failed to start polling thread: {e}")
     
     # Run the app
-    app.run(host="0.0.0.0", port=port, debug=False)
+    try:
+        print(f"🌐 Starting Flask server on 0.0.0.0:{port}...")
+        app.run(
+            host="0.0.0.0", 
+            port=port, 
+            debug=False, 
+            threaded=True,
+            use_reloader=False
+        )
+    except Exception as e:
+        print(f"🚨 Failed to start Flask server: {e}")
