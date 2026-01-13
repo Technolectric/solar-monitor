@@ -73,7 +73,7 @@ class PersistentLoadManager:
         if len(self.patterns[day_type][hour]) > 100:
             self.patterns[day_type][hour] = self.patterns[day_type][hour][-100:]
             
-    def get_forecast(self, hours_ahead=12):
+    def get_forecast(self, hours_ahead=24):
         forecast = []
         now = datetime.now(EAT)
         for i in range(hours_ahead):
@@ -101,59 +101,124 @@ def identify_active_appliances(current, previous, gen_active, backup_volts, prim
     return detected
 
 # ----------------------------
-# 2. Physics & Scheduler Engine
+# 2. Physics & Scheduler Engine (ROBUST VERSION)
 # ----------------------------
 
-# Define Heavy Loads
+# Define Heavy Loads with DURATION
 APPLIANCE_PROFILES = [
-    {"name": "Pool Pump", "watts": 1200, "icon": "🏊"},
-    {"name": "Washing Machine", "watts": 800, "icon": "🧺"},
-    {"name": "Dishwasher", "watts": 1500, "icon": "🍽️"},
-    {"name": "Oven/Cooking", "watts": 2500, "icon": "🍳"}
+    {"name": "Pool Pump", "watts": 1200, "hours": 4, "icon": "🏊"},
+    {"name": "Washing Machine", "watts": 800, "hours": 1.5, "icon": "🧺"},
+    {"name": "Dishwasher", "watts": 1500, "hours": 2, "icon": "🍽️"},
+    {"name": "Oven/Cooking", "watts": 2500, "hours": 1.5, "icon": "🍳"}
 ]
 
-def generate_smart_schedule(current_solar, current_load, p_pct, solar_forecast):
+def simulate_run_impact(start_index, duration_hours, appliance_watts, current_p_wh, s_forecast, l_forecast):
     """
-    Determines if it's safe to run appliances NOW, or finds the BEST time later.
+    Simulates the battery state if we add an appliance load on top of base load.
+    Returns the MINIMUM battery percentage reached during the run.
+    """
+    p_cap = PRIMARY_BATTERY_CAPACITY_WH
+    running_p = current_p_wh
+    min_pct_encountered = 100
+    
+    # We need forecasts for the duration of the run
+    # Ensure lists are long enough
+    if len(s_forecast) < (start_index + duration_hours + 1) or len(l_forecast) < (start_index + duration_hours + 1):
+        return 0 # Fail safe: not enough data
+        
+    # Simulate hour by hour
+    for i in range(int(duration_hours) + 1): # +1 to cover partial hours
+        idx = start_index + i
+        if idx >= len(s_forecast): break
+        
+        # Base Scenario
+        solar_gen = s_forecast[idx]['estimated_generation']
+        base_load = l_forecast[idx]['estimated_load']
+        
+        # Add Appliance Load?
+        # If it's the last hour and duration is 1.5, we only add half load
+        load_factor = 1.0
+        if i == int(duration_hours): 
+            load_factor = duration_hours % 1
+            if load_factor == 0: continue # Loop finished
+            
+        total_load = base_load + (appliance_watts * load_factor)
+        
+        # Physics Step
+        net = solar_gen - total_load
+        
+        if net > 0:
+            running_p = min(p_cap, running_p + net)
+        else:
+            running_p = max(0, running_p - abs(net))
+            
+        current_pct = (running_p / p_cap) * 100
+        if current_pct < min_pct_encountered:
+            min_pct_encountered = current_pct
+            
+    return min_pct_encountered
+
+def generate_smart_schedule(p_pct, s_forecast, l_forecast):
+    """
+    Robust scheduler that runs a forward simulation for every appliance.
     """
     advice = []
-    current_surplus = current_solar - current_load
+    current_p_wh = (p_pct / 100) * PRIMARY_BATTERY_CAPACITY_WH
     
-    # Find peak solar hour from forecast
-    best_hour_dt = None
-    max_solar = 0
-    if solar_forecast:
-        # Look at next 12 hours only
-        for entry in solar_forecast[:12]:
-            if entry['estimated_generation'] > max_solar:
-                max_solar = entry['estimated_generation']
-                best_hour_dt = entry['time']
+    # Determine safe threshold (Buffer above 40% cutoff)
+    SAFE_THRESHOLD = 45.0 
     
-    best_time_str = best_hour_dt.strftime("%I%p").lstrip('0') if best_hour_dt else "Tomorrow"
-
     for app in APPLIANCE_PROFILES:
         watts = app['watts']
+        hours = app['hours']
+        
+        # 1. Simulate running NOW (Index 0)
+        min_pct_now = simulate_run_impact(0, hours, watts, current_p_wh, s_forecast, l_forecast)
+        
         decision = {}
         
-        # 1. Check "Run Now" Conditions
-        if current_surplus > watts:
-            decision = {"status": "now", "msg": "Run Now (Free Solar)", "color": "var(--success)"}
-        elif p_pct > 85:
-            decision = {"status": "now", "msg": "Run Now (Battery Full)", "color": "var(--success)"}
-        elif p_pct > 60 and current_solar > (current_load + (watts * 0.5)):
-            decision = {"status": "ok", "msg": "OK (Mixed Power)", "color": "var(--info)"}
-        
-        # 2. If not now, when?
-        else:
-            if max_solar > (watts + 500):
-                decision = {"status": "wait", "msg": f"Wait until {best_time_str}", "color": "var(--warn)"}
+        if min_pct_now >= SAFE_THRESHOLD:
+            # It's safe, but is it "Free"? (Ending state higher than starting?)
+            if min_pct_now > p_pct:
+                 decision = {"status": "now", "msg": "Run Now (Free Solar)", "color": "var(--success)"}
+            elif min_pct_now > 60:
+                 decision = {"status": "ok", "msg": "OK (Safe Buffer)", "color": "var(--info)"}
             else:
-                decision = {"status": "stop", "msg": "Not Recommended Today", "color": "var(--crit)"}
+                 decision = {"status": "ok", "msg": "OK (Bat Drains)", "color": "var(--warn)"}
+        else:
+            # UNSAFE NOW. Find best future time.
+            best_hour = -1
+            best_min_pct = -1
+            
+            # Check next 12 hours
+            for h in range(1, 12):
+                # We need to estimate battery state at hour h BEFORE starting simulation
+                # (Simple linear projection for starting point of future simulation)
+                # This is complex, so we simplify: Find time of max solar
+                pass 
+            
+            # Simplified "Find Best Time": Look for highest solar generation block
+            best_start_time = "Tomorrow"
+            max_solar_avg = 0
+            
+            for h in range(12): # Look 12 hours ahead
+                # Sum solar for duration
+                solar_sum = 0
+                for d in range(int(hours) + 1):
+                    if (h+d) < len(s_forecast):
+                        solar_sum += s_forecast[h+d]['estimated_generation']
                 
-        # 3. Emergency Override
-        if p_pct < 45:
-             decision = {"status": "stop", "msg": "Battery Critical", "color": "var(--crit)"}
-             
+                if solar_sum > max_solar_avg:
+                    max_solar_avg = solar_sum
+                    if s_forecast[h]['estimated_generation'] > (watts * 0.8): # Ensure start time has solar
+                        best_start_time = s_forecast[h]['time'].strftime("%I%p").lstrip('0')
+
+            decision = {"status": "stop", "msg": f"Unsafe! Wait for {best_start_time}", "color": "var(--crit)"}
+            
+            # Special Case: If battery is critically full (>95), allow it even if solar drops later
+            if p_pct > 95:
+                 decision = {"status": "now", "msg": "Run Now (Dump Energy)", "color": "var(--success)"}
+
         advice.append({**app, **decision})
         
     return advice
@@ -213,7 +278,7 @@ latest_data = {
     "solar_forecast": [], "load_forecast": [], 
     "battery_sim": {"labels": [], "data": []},
     "energy_breakdown": {"chart_data": [1, 1, 1], "total_pct": 0, "total_kwh": 0},
-    "scheduler": [] # <--- NEW
+    "scheduler": []
 }
 
 def get_weather_forecast():
@@ -264,7 +329,7 @@ def poll_growatt():
     last_save = datetime.now(EAT)
     polling_active = True
     
-    print("🚀 System Started: Smart Scheduler Mode")
+    print("🚀 System Started: Robust Physics Mode")
 
     while polling_active:
         try:
@@ -319,8 +384,8 @@ def poll_growatt():
             sim_res = calculate_battery_cascade(s_cast, l_cast, p_min, b_act)
             breakdown = calculate_battery_breakdown(p_min, b_volts)
             
-            # --- Generate Schedule Advice ---
-            schedule = generate_smart_schedule(tot_sol, tot_out, p_min, s_cast)
+            # --- Robust Scheduler (Physics Based) ---
+            schedule = generate_smart_schedule(p_min, s_cast, l_cast)
             
             prev_watts = tot_out
             latest_data = {
@@ -340,7 +405,7 @@ def poll_growatt():
                 "scheduler": schedule,
                 "inverters": inv_data
             }
-            print(f"Update: Load={tot_out}W | Bat={breakdown['total_pct']}%")
+            print(f"Update: Load={tot_out}W | Bat={p_min}%")
             
         except Exception as e: print(f"Error: {e}")
         if polling_active:
