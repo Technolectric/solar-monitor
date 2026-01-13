@@ -112,6 +112,20 @@ FORECAST_HOURS = 12
 EAT = timezone(timedelta(hours=3))
 
 # ----------------------------
+# Health Check Endpoint (CRITICAL FOR RAILWAY)
+# ----------------------------
+@app.route("/health")
+def health_check():
+    """Health check endpoint for Railway"""
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now(EAT).strftime("%Y-%m-%d %H:%M:%S EAT"),
+        "service": "Tulia House Solar Monitor",
+        "polling_active": 'poll_thread' in globals() and poll_thread.is_alive(),
+        "data_age": "initializing" if latest_data.get('timestamp') == 'Initializing...' else "active"
+    }), 200
+
+# ----------------------------
 # Battery Calculation Function
 # ----------------------------
 def calculate_usable_energy(primary_pct, backup_pct):
@@ -458,7 +472,7 @@ def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run):
     elif 1500 <= bat_discharge < 2000 and p_cap < 50: send_email("ℹ️ Moderate Discharge", "Info", "moderate_load", send_via_email=b_active)
 
 # ----------------------------
-# Polling Loop - FIXED VERSION
+# Polling Loop
 # ----------------------------
 def poll_growatt():
     global latest_data, load_history, battery_history, weather_forecast, last_communication, solar_conditions_cache
@@ -494,7 +508,7 @@ def poll_growatt():
                     r.raise_for_status()
                     data = r.json()
                     
-                    # FIXED: Check for error_code instead of just getting "data"
+                    # Check for error_code instead of just getting "data"
                     api_code = data.get("error_code", data.get("code", -1))
                     
                     if api_code == 0:  # Success
@@ -871,8 +885,7 @@ def home():
     else:
         runtime_hours = 0
 
-    # The full HTML template from your original code would go here
-    # Since it's very long, I'll include the corrected section
+    # HTML template
     html_template = """
 <!DOCTYPE html>
 <html lang="en">
@@ -884,13 +897,222 @@ def home():
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
     <style>
-        /* ... your original CSS styles ... */
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --border-color: #30363d;
+            --text-primary: #f0f6fc;
+            --text-secondary: #8b949e;
+            --text-muted: #6e7681;
+            --success: #3fb950;
+            --warning: #d29922;
+            --danger: #f85149;
+            --info: #58a6ff;
+            --good-bg: rgba(63, 185, 80, 0.15);
+            --warning-bg: rgba(210, 153, 34, 0.15);
+            --critical-bg: rgba(248, 81, 73, 0.15);
+            --normal-bg: rgba(88, 166, 255, 0.15);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'DM Sans', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container { max-width: 1600px; margin: 0 auto; }
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(12, 1fr);
+            gap: 20px;
+        }
+        .span-12 { grid-column: span 12; }
+        .span-9 { grid-column: span 9; }
+        .span-6 { grid-column: span 6; }
+        .span-4 { grid-column: span 4; }
+        .span-3 { grid-column: span 3; }
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 20px;
+        }
+        h1 {
+            font-family: 'Space Mono', monospace;
+            font-size: 2.5rem;
+            background: linear-gradient(90deg, var(--info), var(--success));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 10px;
+        }
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+        }
+        .card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            transition: all 0.3s ease;
+        }
+        .card:hover { border-color: var(--text-muted); }
+        .metric-label {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+        .metric-value {
+            font-size: 2.5rem;
+            font-weight: 700;
+            font-family: 'Space Mono', monospace;
+        }
+        .metric-unit {
+            font-size: 1.2rem;
+            color: var(--text-secondary);
+            margin-left: 4px;
+        }
+        .status-hero {
+            padding: 30px;
+            border-radius: 16px;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .status-hero.good { background: var(--good-bg); border: 2px solid var(--success); }
+        .status-hero.warning { background: var(--warning-bg); border: 2px solid var(--warning); }
+        .status-hero.critical { background: var(--critical-bg); border: 2px solid var(--danger); }
+        .status-hero.normal { background: var(--normal-bg); border: 2px solid var(--info); }
+        .status-title {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+        .text-success { color: var(--success); }
+        .text-warning { color: var(--warning); }
+        .text-danger { color: var(--danger); }
+        .text-info { color: var(--info); }
+        .chart-container {
+            height: 300px;
+            position: relative;
+            margin-top: 20px;
+        }
+        .progress-bar {
+            height: 8px;
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        .progress-fill {
+            height: 100%;
+            transition: width 0.5s ease;
+        }
+        .progress-success { background: var(--success); }
+        .progress-warning { background: var(--warning); }
+        .progress-danger { background: var(--danger); }
+        .alert-item {
+            padding: 12px;
+            border-left: 4px solid;
+            margin-bottom: 10px;
+            background: var(--bg-tertiary);
+            border-radius: 0 8px 8px 0;
+        }
+        .alert-critical { border-color: var(--danger); }
+        .alert-warning { border-color: var(--warning); }
+        .alert-info { border-color: var(--info); }
+        .inverter-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .inverter-card {
+            padding: 15px;
+            border-radius: 8px;
+            background: var(--bg-tertiary);
+        }
+        .power-flow {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 40px;
+            padding: 20px;
+            background: var(--bg-tertiary);
+            border-radius: 12px;
+            margin: 20px 0;
+        }
+        .flow-icon {
+            font-size: 3rem;
+            position: relative;
+        }
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.1); opacity: 0.8; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .flow-line {
+            height: 4px;
+            flex-grow: 1;
+            background: var(--border-color);
+            position: relative;
+        }
+        .flow-line.active {
+            background: linear-gradient(90deg, var(--success), transparent);
+            animation: flow 2s linear infinite;
+        }
+        @keyframes flow {
+            0% { background-position: -100% 0; }
+            100% { background-position: 200% 0; }
+        }
+        .recommendation-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .recommendation-item {
+            padding: 15px;
+            border-radius: 8px;
+            background: var(--bg-tertiary);
+            border-left: 4px solid;
+        }
+        .recommendation-item.good { border-color: var(--success); }
+        .recommendation-item.warning { border-color: var(--warning); }
+        .recommendation-item.critical { border-color: var(--danger); }
+        .recommendation-item.normal { border-color: var(--info); }
+        .update-time {
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border-color);
+        }
+        @media (max-width: 1200px) {
+            .dashboard-grid { grid-template-columns: repeat(6, 1fr); }
+            .span-12, .span-9, .span-6, .span-4, .span-3 { grid-column: span 6; }
+        }
+        @media (max-width: 768px) {
+            .dashboard-grid { grid-template-columns: 1fr; }
+            .span-12, .span-9, .span-6, .span-4, .span-3 { grid-column: 1; }
+            h1 { font-size: 2rem; }
+            .power-flow { flex-direction: column; gap: 20px; }
+            .flow-line { width: 4px; height: 40px; }
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="dashboard-grid">
-            <header>
+            <header class="span-12">
                 <h1>TULIA HOUSE SOLAR</h1>
                 <div class="subtitle">{{ timestamp }}</div>
             </header>
@@ -927,8 +1149,214 @@ def home():
                 <div style="font-size: 0.85rem; color: var(--text-muted)">Status: {{ b_stat }}</div>
             </div>
             
-            <!-- ... rest of your original HTML template ... -->
+            <!-- Usable Energy -->
+            <div class="card span-6">
+                <div class="metric-label">Usable Energy (Corrected)</div>
+                <div class="metric-value text-success">{{ '%0.1f'|format(usable.total_kwh) }}<span class="metric-unit">kWh</span></div>
+                <div style="font-size: 1.2rem; margin-top: 5px; color: var(--text-secondary)">
+                    {{ '%0.f'|format(usable.total_pct) }}% of {{ usable.total_usable_capacity }} kWh usable capacity
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill progress-{{ battery_bar_color }}" style="width: {{ usable.total_pct }}%"></div>
+                </div>
+                <div style="display: flex; justify-content: space-between; margin-top: 15px; font-size: 0.9rem;">
+                    <div>Primary: {{ '%0.1f'|format(usable.primary_kwh) }} kWh</div>
+                    <div>Backup: {{ '%0.1f'|format(usable.backup_kwh) }} kWh</div>
+                    <div>Runtime: {{ '%0.1f'|format(runtime_hours) }}h</div>
+                </div>
+            </div>
             
+            <!-- System Status -->
+            <div class="card span-6">
+                <div class="metric-label">System Status</div>
+                <div style="display: flex; flex-wrap: wrap; gap: 15px; margin-top: 15px;">
+                    <div style="flex: 1; min-width: 120px;">
+                        <div style="font-size: 0.9rem; color: var(--text-secondary)">Generator</div>
+                        <div style="font-size: 1.5rem; color: {{ 'var(--danger)' if gen_on else 'var(--success)' }}">
+                            {{ '🚨 RUNNING' if gen_on else '✅ OFF' }}
+                        </div>
+                    </div>
+                    <div style="flex: 1; min-width: 120px;">
+                        <div style="font-size: 0.9rem; color: var(--text-secondary)">Backup Active</div>
+                        <div style="font-size: 1.5rem; color: {{ 'var(--warning)' if b_active else 'var(--success)' }}">
+                            {{ '⚠️ ACTIVE' if b_active else '✅ INACTIVE' }}
+                        </div>
+                    </div>
+                    <div style="flex: 1; min-width: 120px;">
+                        <div style="font-size: 0.9rem; color: var(--text-secondary)">Inverter Temp</div>
+                        <div style="font-size: 1.5rem; color: {{ 'var(--danger)' if inverter_temp|float > 60 else 'var(--warning)' if inverter_temp|float > 50 else 'var(--success)' }}">
+                            {{ inverter_temp }}°C
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Power Flow Visualization -->
+            <div class="card span-12">
+                <div class="metric-label">Power Flow</div>
+                <div class="power-flow">
+                    <div class="flow-icon {{ 'pulse' if solar_active else '' }}">☀️</div>
+                    <div class="flow-line {{ 'active' if solar_active else '' }}" style="width: {{ solar_line_width }}px"></div>
+                    
+                    <div class="flow-icon">🔋</div>
+                    <div class="flow-line {{ 'active' if battery_charging or battery_discharging else '' }}" style="width: {{ battery_line_width }}px"></div>
+                    
+                    <div class="flow-icon">🏠</div>
+                    <div class="flow-line active" style="width: {{ load_line_width }}px"></div>
+                    
+                    <div class="flow-icon">⚡</div>
+                </div>
+                <div style="display: flex; justify-content: space-between; margin-top: 15px; text-align: center;">
+                    <div>
+                        <div style="font-size: 0.9rem; color: var(--text-secondary)">Solar</div>
+                        <div style="font-size: 1.2rem">{{ '%0.f'|format(tot_sol) }}W</div>
+                    </div>
+                    <div>
+                        <div style="font-size: 0.9rem; color: var(--text-secondary)">Battery</div>
+                        <div style="font-size: 1.2rem; color: {{ 'var(--success)' if battery_charging else 'var(--warning)' if battery_discharging else 'var(--text-secondary)' }}">
+                            {{ '%0.f'|format(tot_dis) }}W {{ '↑' if battery_charging else '↓' if battery_discharging else '→' }}
+                        </div>
+                    </div>
+                    <div>
+                        <div style="font-size: 0.9rem; color: var(--text-secondary)">Load</div>
+                        <div style="font-size: 1.2rem">{{ '%0.f'|format(tot_load) }}W</div>
+                    </div>
+                    <div>
+                        <div style="font-size: 0.9rem; color: var(--text-secondary)">Net</div>
+                        <div style="font-size: 1.2rem; color: {{ 'var(--success)' if surplus_power > 0 else 'var(--warning)' }}">
+                            {{ '%0.f'|format(surplus_power) }}W
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Solar & Load Forecast -->
+            <div class="card span-9">
+                <div class="metric-label">Solar & Load Forecast (Next 12 Hours)</div>
+                <div class="chart-container">
+                    <canvas id="forecastChart"></canvas>
+                </div>
+                <div style="font-size: 0.9rem; color: var(--text-secondary); margin-top: 10px;">
+                    Weather Source: {{ weather_source }}
+                </div>
+            </div>
+            
+            <!-- Smart Recommendations -->
+            <div class="card span-3">
+                <div class="metric-label">Smart Recommendations</div>
+                <div class="recommendation-grid">
+                    {% for item in recommendation_items %}
+                    <div class="recommendation-item {{ item.class }}">
+                        <div style="font-size: 1.5rem; margin-bottom: 5px">{{ item.icon }}</div>
+                        <div style="font-weight: 600; margin-bottom: 5px">{{ item.title }}</div>
+                        <div style="font-size: 0.9rem; color: var(--text-secondary)">{{ item.description }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            
+            <!-- Inverter Status -->
+            <div class="card span-6">
+                <div class="metric-label">Inverter Status</div>
+                <div class="inverter-grid">
+                    {% for inv in latest_data.inverters %}
+                    <div class="inverter-card" style="border-left: 4px solid {{ 'var(--danger)' if inv.communication_lost else 'var(--warning)' if inv.high_temperature or inv.has_fault else 'var(--success)' }}">
+                        <div style="display: flex; justify-content: space-between; align-items: start;">
+                            <div>
+                                <div style="font-weight: 600">{{ inv.Label }}</div>
+                                <div style="font-size: 0.8rem; color: var(--text-secondary)">{{ inv.Type|title }} • {{ inv.SN[:8] }}...</div>
+                            </div>
+                            <div style="text-align: right;">
+                                <div style="font-size: 1.5rem; font-family: 'Space Mono'">{{ '%0.f'|format(inv.OutputPower) }}W</div>
+                                <div style="font-size: 0.8rem; color: var(--text-secondary)">Output</div>
+                            </div>
+                        </div>
+                        <div style="margin-top: 10px; font-size: 0.9rem;">
+                            <div style="display: flex; justify-content: space-between;">
+                                <span>Battery:</span>
+                                <span>{{ '%0.f'|format(inv.Capacity) if inv.Capacity else '?' }}%</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span>Solar:</span>
+                                <span>{{ '%0.f'|format(inv.ppv) }}W</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span>Temp:</span>
+                                <span style="color: {{ 'var(--danger)' if inv.temperature|float > 60 else 'var(--warning)' if inv.temperature|float > 50 else 'inherit' }}">
+                                    {{ '%0.f'|format(inv.temperature) }}°C
+                                </span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span>Status:</span>
+                                <span style="color: {{ 'var(--danger)' if inv.communication_lost else 'var(--warning)' if inv.has_fault else 'var(--success)' }}">
+                                    {{ '🔴 Offline' if inv.communication_lost else '⚠️ Fault' if inv.has_fault else '✅ ' + inv.Status }}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            
+            <!-- Load Schedule & Battery Simulation -->
+            <div class="card span-6">
+                <div class="metric-label">Optimal Load Schedule</div>
+                <div class="recommendation-grid">
+                    {% for item in schedule_items %}
+                    <div class="recommendation-item {{ item.class }}">
+                        <div style="font-size: 1.5rem; margin-bottom: 5px">{{ item.icon }}</div>
+                        <div style="font-weight: 600; margin-bottom: 5px">{{ item.title }}</div>
+                        <div style="font-size: 0.9rem; color: var(--text-secondary)">{{ item.time }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+                
+                {% if trace_pct %}
+                <div style="margin-top: 20px;">
+                    <div class="metric-label">Battery Simulation</div>
+                    <div style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 10px;">
+                        {% set pred = latest_data.battery_life_prediction %}
+                        {% if pred.generator_needed %}
+                        ⚠️ Generator needed at {{ pred.time_empty }} ({{ '%0.1f'|format(pred.genset_hours) }} hours)
+                        {% elif pred.switchover_occurred %}
+                        ℹ️ Backup battery will be used
+                        {% else %}
+                        ✅ Battery sufficient for forecast period
+                        {% endif %}
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="batteryChart"></canvas>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+            
+            <!-- Recent Alerts -->
+            {% if alerts %}
+            <div class="card span-12">
+                <div class="metric-label">Recent Alerts</div>
+                <div style="margin-top: 15px;">
+                    {% for alert in alerts %}
+                    <div class="alert-item alert-{{ alert.type.split('_')[0] if '_' in alert.type else 'info' }}">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                            <div style="font-weight: 600">{{ alert.subject[:50] }}{{ '...' if alert.subject|length > 50 else '' }}</div>
+                            <div style="font-size: 0.8rem; color: var(--text-secondary)">{{ alert.time }}</div>
+                        </div>
+                        <div style="font-size: 0.9rem; color: var(--text-muted)">{{ alert.type|replace('_', ' ')|title }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+            
+            <div class="span-12 update-time">
+                Data updates every {{ POLL_INTERVAL_MINUTES }} minutes. Last API poll: {{ latest_data.timestamp }}
+                {% if not TOKEN %}
+                <div style="color: var(--danger); margin-top: 10px;">
+                    ⚠️ API_TOKEN not set. Polling disabled. Set environment variable in Railway.
+                </div>
+                {% endif %}
+            </div>
         </div>
     </div>
     
@@ -947,7 +1375,7 @@ def home():
             interaction: { mode: 'index', intersect: false }
         };
 
-        // Forecast
+        // Forecast Chart
         new Chart(document.getElementById('forecastChart'), {
             type: 'line',
             data: {
@@ -973,17 +1401,95 @@ def home():
                     }
                 ]
             },
-            options: commonOptions
+            options: {
+                ...commonOptions,
+                scales: {
+                    y: { beginAtZero: true, title: { display: true, text: 'Power (W)' } },
+                    x: { title: { display: true, text: 'Time' } }
+                }
+            }
         });
         
-        // ... rest of your original JavaScript ... 
+        // Battery Simulation Chart
+        {% if trace_pct %}
+        new Chart(document.getElementById('batteryChart'), {
+            type: 'line',
+            data: {
+                labels: {{ sim_t|tojson }},
+                datasets: [{
+                    label: 'Battery Level',
+                    data: {{ trace_pct|tojson }},
+                    borderColor: '#d29922',
+                    backgroundColor: 'rgba(210, 153, 34, 0.1)',
+                    fill: true,
+                    tension: 0.4,
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                ...commonOptions,
+                scales: {
+                    y: { 
+                        beginAtZero: true, 
+                        max: 100,
+                        title: { display: true, text: 'Battery %' },
+                        ticks: { callback: value => value + '%' }
+                    },
+                    x: { title: { display: true, text: 'Time' } }
+                },
+                plugins: {
+                    annotation: {
+                        annotations: {
+                            line1: {
+                                type: 'line',
+                                yMin: 40,
+                                yMax: 40,
+                                borderColor: '#f85149',
+                                borderWidth: 1,
+                                borderDash: [5, 5],
+                                label: {
+                                    display: true,
+                                    content: 'Primary cutoff',
+                                    position: 'end'
+                                }
+                            },
+                            line2: {
+                                type: 'line',
+                                yMin: 20,
+                                yMax: 20,
+                                borderColor: '#d29922',
+                                borderWidth: 1,
+                                borderDash: [5, 5],
+                                label: {
+                                    display: true,
+                                    content: 'Backup cutoff',
+                                    position: 'end'
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        {% endif %}
         
         // Auto Refresh
         setInterval(() => {
             fetch('/api/data').then(r => r.json()).then(d => {
-                if(d.timestamp !== "{{ latest_data.timestamp }}") location.reload();
+                if(d.timestamp !== "{{ latest_data.timestamp }}") {
+                    location.reload();
+                }
+            }).catch(err => {
+                console.log('Auto-refresh failed:', err);
             });
         }, 60000);
+        
+        // Check if polling is active
+        fetch('/health').then(r => r.json()).then(data => {
+            if(!data.polling_active && data.status === 'healthy') {
+                console.warn('Polling thread not active but app is healthy');
+            }
+        });
     </script>
 </body>
 </html>
@@ -1033,16 +1539,31 @@ def home():
         b_vals=b_vals,
         latest_data=latest_data,
         alerts=alerts,
-        runtime_hours=runtime_hours
+        runtime_hours=runtime_hours,
+        POLL_INTERVAL_MINUTES=POLL_INTERVAL_MINUTES,
+        weather_source=weather_source
     )
 
 # ================ RAILWAY/PRODUCTION SETTINGS ================
 if __name__ == "__main__":
     import threading
     
-    # Start polling thread
-    poll_thread = threading.Thread(target=poll_growatt, daemon=True)
-    poll_thread.start()
+    # Debug environment
+    print("=" * 50)
+    print("RAILWAY DEPLOYMENT STARTING")
+    print(f"PORT: {os.getenv('PORT', '10000')}")
+    print(f"API_TOKEN set: {'YES' if TOKEN else 'NO'}")
+    print(f"SERIAL_NUMBERS: {SERIAL_NUMBERS}")
+    print("=" * 50)
+    
+    # Start polling thread only if token is set
+    if TOKEN and SERIAL_NUMBERS and SERIAL_NUMBERS[0]:
+        poll_thread = threading.Thread(target=poll_growatt, daemon=True)
+        poll_thread.start()
+        print(f"✅ Polling thread started with interval {POLL_INTERVAL_MINUTES} minutes")
+    else:
+        print("⚠️ WARNING: API_TOKEN not set or SERIAL_NUMBERS empty, polling disabled")
+        print("⚠️ Add API_TOKEN and SERIAL_NUMBERS in Railway environment variables")
     
     port = int(os.getenv("PORT", 10000))
     
