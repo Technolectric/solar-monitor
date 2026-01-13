@@ -16,6 +16,29 @@ app = Flask(__name__)
 def health_check():
     return "OK", 200
 
+# ======= DEBUG ROUTE =======
+@app.route('/debug-poll')
+def debug_poll():
+    import threading
+    import traceback
+    
+    threads = []
+    for thread in threading.enumerate():
+        threads.append({
+            "name": thread.name,
+            "alive": thread.is_alive(),
+            "daemon": thread.daemon
+        })
+    
+    return {
+        "latest_data_timestamp": latest_data.get('timestamp', 'NO DATA'),
+        "thread_count": threading.active_count(),
+        "threads": threads,
+        "polling_started": any("Thread" in str(t) for t in threading.enumerate()),
+        "api_working": True
+    }
+# ===========================
+
 # ----------------------------
 # Growatt Config (from env)
 # ----------------------------
@@ -465,140 +488,157 @@ def poll_growatt():
     global latest_data, load_history, battery_history, weather_forecast, last_communication, solar_conditions_cache
     global pool_pump_start_time, pool_pump_last_alert
 
-    # RAILWAY FIX: Wait 30 seconds before starting heavy operations
-    print("⏳ Waiting 30 seconds for Railway health check to pass...")
-    time.sleep(30)
-    print("✅ Starting Growatt polling...")
-
-    weather_forecast = get_weather_forecast()
-    if weather_forecast: solar_conditions_cache = analyze_solar_conditions(weather_forecast)
-    last_wx = datetime.now(EAT)
+    print("🚀 POLL_GROWATT: Function starting...")
     
-    while True:
-        try:
-            now = datetime.now(EAT)
-            alert_history[:] = [a for a in alert_history if a['timestamp'] >= (now - timedelta(hours=12))]
-            
-            if (now - last_wx) > timedelta(minutes=30):
-                weather_forecast = get_weather_forecast()
-                if weather_forecast: solar_conditions_cache = analyze_solar_conditions(weather_forecast)
-                last_wx = now
+    # RAILWAY FIX: Wait 30 seconds before starting heavy operations
+    print("⏳ POLL_GROWATT: Waiting 30 seconds for Railway health check...")
+    time.sleep(30)
+    print("✅ POLL_GROWATT: Starting Growatt polling...")
+    
+    try:
+        print("🌤️ POLL_GROWATT: Getting weather forecast...")
+        weather_forecast = get_weather_forecast()
+        print(f"📊 POLL_GROWATT: Weather source: {weather_source}")
+        
+        if weather_forecast: 
+            solar_conditions_cache = analyze_solar_conditions(weather_forecast)
+            print("☀️ POLL_GROWATT: Solar conditions analyzed")
+        
+        last_wx = datetime.now(EAT)
+        print("🔄 POLL_GROWATT: Starting main polling loop...")
+        
+        while True:
+            try:
+                now = datetime.now(EAT)
+                alert_history[:] = [a for a in alert_history if a['timestamp'] >= (now - timedelta(hours=12))]
                 
-            tot_out, tot_bat, tot_sol = 0, 0, 0
-            inv_data, p_caps = [], []
-            b_data, gen_on = None, False
-            
-            for sn in SERIAL_NUMBERS:
-                try:
-                    # Create a new session for each request to avoid proxy issues
-                    session = requests.Session()
-                    session.trust_env = False  # Don't use system proxy
-                    r = session.post(API_URL, data={"storage_sn": sn}, headers=headers, timeout=20)
-                    r.raise_for_status()
-                    d = r.json().get("data", {})
-                    last_communication[sn] = now
-                    cfg = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown", "display_order": 99})
+                if (now - last_wx) > timedelta(minutes=30):
+                    weather_forecast = get_weather_forecast()
+                    if weather_forecast: solar_conditions_cache = analyze_solar_conditions(weather_forecast)
+                    last_wx = now
                     
-                    op = float(d.get("outPutPower") or 0)
-                    cap = float(d.get("capacity") or 0)
-                    vb = float(d.get("vBat") or 0)
-                    pb = float(d.get("pBat") or 0)
-                    sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
-                    tmp = max(float(d.get("invTemperature") or 0), float(d.get("dcDcTemperature") or 0), float(d.get("temperature") or 0))
-                    flt = int(d.get("errorCode") or 0) != 0
-                    
-                    tot_out += op
-                    tot_sol += sol
-                    if pb > 0: tot_bat += pb
-                    
-                    info = {
-                        "SN": sn, "Label": cfg['label'], "Type": cfg['type'], "DisplayOrder": cfg['display_order'],
-                        "OutputPower": op, "Capacity": cap, "vBat": vb, "pBat": pb, "ppv": sol, "temperature": tmp,
-                        "high_temperature": tmp >= 60, "Status": d.get("statusText", "Unknown"), "has_fault": flt,
-                        "last_seen": now.strftime("%Y-%m-%d %H:%M:%S"), "communication_lost": False
-                    }
-                    inv_data.append(info)
-                    
-                    if cfg['type'] == 'primary' and cap > 0: p_caps.append(cap)
-                    elif cfg['type'] == 'backup':
-                        b_data = info
-                        if float(d.get("vac") or 0) > 100 or float(d.get("pAcInPut") or 0) > 50: gen_on = True
-                except Exception as e:
-                    print(f"Error fetching data for {sn}: {e}")
-                    if sn in last_communication and (now - last_communication[sn]) > timedelta(minutes=10):
-                        cfg = INVERTER_CONFIG.get(sn, {})
-                        inv_data.append({"SN": sn, "Label": cfg.get('label', sn), "Type": cfg.get('type'), "DisplayOrder": 99, "communication_lost": True})
-            
-            inv_data.sort(key=lambda x: x.get('DisplayOrder', 99))
-            update_patterns(tot_sol, tot_out)
-            
-            load_history.append((now, tot_out))
-            load_history[:] = [(t, p) for t, p in load_history if t >= (now - timedelta(days=14))]
-            battery_history.append((now, tot_bat))
-            battery_history[:] = [(t, p) for t, p in battery_history if t >= (now - timedelta(days=14))]
-            
-            s_pat = analyze_historical_solar_pattern()
-            l_pat = analyze_historical_load_pattern()
-            s_cast = generate_solar_forecast(weather_forecast, s_pat)
-            avg_load = calculate_moving_average_load(45)
-            l_cast = generate_load_forecast(l_pat, avg_load)
-            
-            p_min = min(p_caps) if p_caps else 0
-            b_volts = b_data['vBat'] if b_data else 0
-            b_act = b_data['OutputPower'] > 50 if b_data else False
-            b_pct = max(0, min(100, (b_volts - 51.0) / 2.0 * 100))
-            
-            # Calculate usable energy with correct logic
-            usable = calculate_usable_energy(p_min, b_pct)
-            
-            pred = calculate_battery_cascade(s_cast, l_cast, p_min, b_act)
+                tot_out, tot_bat, tot_sol = 0, 0, 0
+                inv_data, p_caps = [], []
+                b_data, gen_on = None, False
+                
+                for sn in SERIAL_NUMBERS:
+                    try:
+                        # Create a new session for each request to avoid proxy issues
+                        session = requests.Session()
+                        session.trust_env = False  # Don't use system proxy
+                        r = session.post(API_URL, data={"storage_sn": sn}, headers=headers, timeout=20)
+                        r.raise_for_status()
+                        d = r.json().get("data", {})
+                        last_communication[sn] = now
+                        cfg = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown", "display_order": 99})
+                        
+                        op = float(d.get("outPutPower") or 0)
+                        cap = float(d.get("capacity") or 0)
+                        vb = float(d.get("vBat") or 0)
+                        pb = float(d.get("pBat") or 0)
+                        sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
+                        tmp = max(float(d.get("invTemperature") or 0), float(d.get("dcDcTemperature") or 0), float(d.get("temperature") or 0))
+                        flt = int(d.get("errorCode") or 0) != 0
+                        
+                        tot_out += op
+                        tot_sol += sol
+                        if pb > 0: tot_bat += pb
+                        
+                        info = {
+                            "SN": sn, "Label": cfg['label'], "Type": cfg['type'], "DisplayOrder": cfg['display_order'],
+                            "OutputPower": op, "Capacity": cap, "vBat": vb, "pBat": pb, "ppv": sol, "temperature": tmp,
+                            "high_temperature": tmp >= 60, "Status": d.get("statusText", "Unknown"), "has_fault": flt,
+                            "last_seen": now.strftime("%Y-%m-%d %H:%M:%S"), "communication_lost": False
+                        }
+                        inv_data.append(info)
+                        
+                        if cfg['type'] == 'primary' and cap > 0: p_caps.append(cap)
+                        elif cfg['type'] == 'backup':
+                            b_data = info
+                            if float(d.get("vac") or 0) > 100 or float(d.get("pAcInPut") or 0) > 50: gen_on = True
+                    except Exception as e:
+                        print(f"Error fetching data for {sn}: {e}")
+                        if sn in last_communication and (now - last_communication[sn]) > timedelta(minutes=10):
+                            cfg = INVERTER_CONFIG.get(sn, {})
+                            inv_data.append({"SN": sn, "Label": cfg.get('label', sn), "Type": cfg.get('type'), "DisplayOrder": 99, "communication_lost": True})
+                
+                inv_data.sort(key=lambda x: x.get('DisplayOrder', 99))
+                update_patterns(tot_sol, tot_out)
+                
+                load_history.append((now, tot_out))
+                load_history[:] = [(t, p) for t, p in load_history if t >= (now - timedelta(days=14))]
+                battery_history.append((now, tot_bat))
+                battery_history[:] = [(t, p) for t, p in battery_history if t >= (now - timedelta(days=14))]
+                
+                s_pat = analyze_historical_solar_pattern()
+                l_pat = analyze_historical_load_pattern()
+                s_cast = generate_solar_forecast(weather_forecast, s_pat)
+                avg_load = calculate_moving_average_load(45)
+                l_cast = generate_load_forecast(l_pat, avg_load)
+                
+                p_min = min(p_caps) if p_caps else 0
+                b_volts = b_data['vBat'] if b_data else 0
+                b_act = b_data['OutputPower'] > 50 if b_data else False
+                b_pct = max(0, min(100, (b_volts - 51.0) / 2.0 * 100))
+                
+                # Calculate usable energy with correct logic
+                usable = calculate_usable_energy(p_min, b_pct)
+                
+                pred = calculate_battery_cascade(s_cast, l_cast, p_min, b_act)
 
-            if now.hour >= 16:
-                if tot_bat > 1100:
-                    if pool_pump_start_time is None:
-                        pool_pump_start_time = now
-                    
-                    duration = now - pool_pump_start_time
-                    if duration > timedelta(hours=3) and now.hour >= 18:
-                        if pool_pump_last_alert is None or (now - pool_pump_last_alert) > timedelta(hours=1):
-                            duration_hours = int(duration.total_seconds() // 3600)
-                            send_email(
-                                "⚠️ HIGH LOAD ALERT: Pool Pumps?", 
-                                f"Battery discharge has been over 1.1kW for {duration_hours} hours. Did you leave the pool pumps on?", 
-                                "high_load_continuous"
-                            )
-                            pool_pump_last_alert = now
+                if now.hour >= 16:
+                    if tot_bat > 1100:
+                        if pool_pump_start_time is None:
+                            pool_pump_start_time = now
+                        
+                        duration = now - pool_pump_start_time
+                        if duration > timedelta(hours=3) and now.hour >= 18:
+                            if pool_pump_last_alert is None or (now - pool_pump_last_alert) > timedelta(hours=1):
+                                duration_hours = int(duration.total_seconds() // 3600)
+                                send_email(
+                                    "⚠️ HIGH LOAD ALERT: Pool Pumps?", 
+                                    f"Battery discharge has been over 1.1kW for {duration_hours} hours. Did you leave the pool pumps on?", 
+                                    "high_load_continuous"
+                                )
+                                pool_pump_last_alert = now
+                    else:
+                        pool_pump_start_time = None
                 else:
                     pool_pump_start_time = None
-            else:
-                pool_pump_start_time = None
-            
-            latest_data = {
-                "timestamp": now.strftime("%Y-%m-%d %H:%M:%S EAT"),
-                "total_output_power": tot_out,
-                "total_battery_discharge_W": tot_bat,
-                "total_solar_input_W": tot_sol,
-                "primary_battery_min": p_min,
-                "backup_battery_voltage": b_volts,
-                "backup_voltage_status": get_backup_voltage_status(b_volts)[0],
-                "backup_active": b_act,
-                "backup_percent_calc": b_pct,
-                "generator_running": gen_on,
-                "inverters": inv_data,
-                "solar_forecast": s_cast,
-                "load_forecast": l_cast,
-                "battery_life_prediction": pred,
-                "weather_source": weather_source,
-                "usable_energy": usable
-            }
-            
-            print(f"{latest_data['timestamp']} | Load={tot_out:.0f}W | Solar={tot_sol:.0f}W | Battery={usable['total_pct']:.0f}%")
-            check_alerts(inv_data, solar_conditions_cache, tot_sol, tot_bat, gen_on)
-        except Exception as e: 
-            print(f"Error in polling: {e}")
-            import traceback
-            traceback.print_exc()
-        time.sleep(POLL_INTERVAL_MINUTES * 60)
+                
+                latest_data = {
+                    "timestamp": now.strftime("%Y-%m-%d %H:%M:%S EAT"),
+                    "total_output_power": tot_out,
+                    "total_battery_discharge_W": tot_bat,
+                    "total_solar_input_W": tot_sol,
+                    "primary_battery_min": p_min,
+                    "backup_battery_voltage": b_volts,
+                    "backup_voltage_status": get_backup_voltage_status(b_volts)[0],
+                    "backup_active": b_act,
+                    "backup_percent_calc": b_pct,
+                    "generator_running": gen_on,
+                    "inverters": inv_data,
+                    "solar_forecast": s_cast,
+                    "load_forecast": l_cast,
+                    "battery_life_prediction": pred,
+                    "weather_source": weather_source,
+                    "usable_energy": usable
+                }
+                
+                print(f"{latest_data['timestamp']} | Load={tot_out:.0f}W | Solar={tot_sol:.0f}W | Battery={usable['total_pct']:.0f}%")
+                check_alerts(inv_data, solar_conditions_cache, tot_sol, tot_bat, gen_on)
+            except Exception as e: 
+                print(f"Error in polling: {e}")
+                import traceback
+                traceback.print_exc()
+            time.sleep(POLL_INTERVAL_MINUTES * 60)
+    except Exception as e:
+        print(f"🚨 POLL_GROWATT: CRASHED with error: {e}")
+        import traceback
+        traceback.print_exc()
+        # Restart after crash
+        time.sleep(60)
+        poll_growatt()
 
 # ----------------------------
 # API Endpoints
@@ -1250,7 +1290,7 @@ def home():
         
         .battery-bar-track {
             width: 100%;
-            height: 32px;
+            height = 32px;
             background: rgba(0, 0, 0, 0.3);
             border-radius: 8px;
             overflow: hidden;
