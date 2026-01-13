@@ -465,6 +465,11 @@ def poll_growatt():
     global latest_data, load_history, battery_history, weather_forecast, last_communication, solar_conditions_cache
     global pool_pump_start_time, pool_pump_last_alert
 
+    # RAILWAY FIX: Wait 30 seconds before starting heavy operations
+    print("⏳ Waiting 30 seconds for Railway health check to pass...")
+    time.sleep(30)
+    print("✅ Starting Growatt polling...")
+
     weather_forecast = get_weather_forecast()
     if weather_forecast: solar_conditions_cache = analyze_solar_conditions(weather_forecast)
     last_wx = datetime.now(EAT)
@@ -1885,11 +1890,7 @@ def home():
 # ================ RAILWAY/PRODUCTION SETTINGS ================
 if __name__ == "__main__":
     import os
-    import time  # ADD THIS LINE
     port = int(os.environ.get("PORT", 10000))
-    
-    # RAILWAY FIX: Wait 10 seconds before starting heavy polling
-    time.sleep(10)  # ADD THIS LINE
     
     # Start polling thread
     from threading import Thread
