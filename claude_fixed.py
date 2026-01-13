@@ -21,7 +21,7 @@ API_URL = "https://openapi.growatt.com/v1/device/storage/storage_last_data"
 TOKEN = os.getenv("API_TOKEN")
 SERIAL_NUMBERS = os.getenv("SERIAL_NUMBERS", "").split(",")
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
-DATA_FILE = "load_patterns.json" # <--- NEW: Persistence File
+DATA_FILE = "load_patterns.json"
 
 print(f"🔧 Configuration: TOKEN={'SET' if TOKEN else 'NOT SET'}, SERIALS={len(SERIAL_NUMBERS)}")
 
@@ -34,7 +34,7 @@ INVERTER_CONFIG = {
     "JNK1CDR0KQ": {"label": "Inverter 3 (Backup)", "type": "backup", "datalog": "DDD0B0221H", "display_order": 3}
 }
 
-# Thresholds & Specs
+# Specs
 PRIMARY_BATTERY_THRESHOLD = 40
 BACKUP_VOLTAGE_THRESHOLD = 51.2
 TOTAL_SOLAR_CAPACITY_KW = 10
@@ -53,7 +53,7 @@ RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL')
 EAT = timezone(timedelta(hours=3))
 
 # ----------------------------
-# 1. NEW: Persistence Manager
+# 1. Persistence Manager
 # ----------------------------
 class PersistentLoadManager:
     """Saves load patterns to disk so predictions improve over time."""
@@ -96,7 +96,6 @@ class PersistentLoadManager:
             if history:
                 est = sum(history) / len(history)
             else:
-                # Fallback logic if no history
                 if 18 <= int(f_hour) <= 21: est = 2500
                 elif 0 <= int(f_hour) <= 5: est = 600
                 else: est = 1200
@@ -106,19 +105,15 @@ class PersistentLoadManager:
 load_manager = PersistentLoadManager(DATA_FILE)
 
 # ----------------------------
-# 2. NEW: Smart Appliance Detection
+# 2. Smart Appliance Detection
 # ----------------------------
 def identify_active_appliances(current, previous, gen_active, backup_volts, primary_pct):
-    """
-    Identifies specific loads and distinguishes Manual Gen vs Auto Gen.
-    """
     detected = []
     delta = current - previous
 
     # --- Generator Logic ---
     if gen_active:
-        # If Primary is > 42%, the system implies the 'Main' power is fine.
-        # Therefore, Gen usage is Manual (Water Heating).
+        # High Primary (>42%) implies Manual Water Heating
         if primary_pct > 42:
             detected.append("🚿 Water Heating (Manual Start)")
             return detected
@@ -132,7 +127,6 @@ def identify_active_appliances(current, previous, gen_active, backup_volts, prim
     elif current > 1800: detected.append("🍳 Cooking (Oven/Stove)")
     elif 400 <= current < 1000: detected.append("📺 TV / Lighting")
 
-    # Spike Detection
     if delta > 1500: detected.append("☕ Kettle/Microwave (Started)")
         
     return detected
@@ -147,7 +141,7 @@ latest_data = {
     "timestamp": "Initializing...", "total_output_power": 0, "total_battery_discharge_W": 0,
     "total_solar_input_W": 0, "primary_battery_min": 0, "backup_battery_voltage": 0,
     "backup_voltage_status": "Unknown", "backup_active": False, "backup_percent_calc": 0,
-    "generator_running": False, "inverters": [], "detected_appliances": [], # <--- NEW
+    "generator_running": False, "inverters": [], "detected_appliances": [], 
     "solar_forecast": [], "load_forecast": [],
     "battery_life_prediction": None, "weather_source": "Initializing...",
     "usable_energy": {"primary_kwh": 0, "backup_kwh": 0, "total_kwh": 0, "total_pct": 0}
@@ -155,12 +149,10 @@ latest_data = {
 load_history, battery_history = [], []
 weather_forecast = {}
 solar_conditions_cache = None
-solar_generation_pattern = deque(maxlen=5000) # Kept for solar pattern
-pool_pump_start_time = None
-pool_pump_last_alert = None
+solar_generation_pattern = deque(maxlen=5000)
 
 # ----------------------------
-# Original Helper Functions (Preserved)
+# Helper Functions
 # ----------------------------
 def calculate_usable_energy(primary_pct, backup_pct):
     primary_available_wh = max(0, ((primary_pct - 40) / 100) * PRIMARY_BATTERY_CAPACITY_WH)
@@ -174,7 +166,7 @@ def calculate_usable_energy(primary_pct, backup_pct):
     total_available_pct = (total_available_kwh / total_usable_capacity_kwh) * 100 if total_usable_capacity_kwh > 0 else 0
     return {'primary_kwh': round(primary_available_kwh, 1), 'backup_kwh': round(backup_available_kwh, 1), 'total_kwh': round(total_available_kwh, 1), 'total_pct': round(total_available_pct, 1), 'total_usable_capacity': round(total_usable_capacity_kwh, 1)}
 
-# --- All 4 Weather Sources Preserved ---
+# --- All 4 Weather Sources ---
 def get_weather_from_openmeteo():
     try:
         url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=cloud_cover,shortwave_radiation&timezone=Africa/Nairobi&forecast_days=2"
@@ -228,7 +220,6 @@ def get_fallback_weather():
     return {'times': times, 'cloud_cover': clouds, 'solar_radiation': rads, 'source': 'Synthetic (Offline)'}
 
 def get_weather_forecast():
-    global weather_source
     for src, func in [("Open-Meteo", get_weather_from_openmeteo), ("WeatherAPI", get_weather_from_weatherapi), ("7Timer", get_weather_from_7timer)]:
         f = func()
         if f and len(f.get('times', [])) > 0:
@@ -322,7 +313,7 @@ def generate_solar_forecast(weather_data, pattern):
         forecast.append({'time': d['time'], 'hour': h, 'estimated_generation': max(0, est)})
     return forecast
 
-# --- Original Complex Simulation Logic Preserved ---
+# --- Battery Simulation Logic ---
 def calculate_battery_cascade(solar, load, p_pct, b_active=False):
     if not solar or not load: return None
     
@@ -371,7 +362,6 @@ def send_email(subject, html, alert_type="general", send_via_email=True):
     if alert_type in last_alert_time and (datetime.now(EAT) - last_alert_time[alert_type]) < timedelta(minutes=cooldown):
         return False
     
-    # Send logic
     if send_via_email and RESEND_API_KEY:
         try:
             requests.post("https://api.resend.com/emails", headers={"Authorization": f"Bearer {RESEND_API_KEY}"}, json={"from": SENDER_EMAIL, "to": [RECIPIENT_EMAIL], "subject": subject, "html": html})
@@ -380,17 +370,19 @@ def send_email(subject, html, alert_type="general", send_via_email=True):
     now = datetime.now(EAT)
     last_alert_time[alert_type] = now
     alert_history.append({"timestamp": now, "type": alert_type, "subject": subject})
+    # Keep last 20
+    alert_history[:] = [a for a in alert_history if a['timestamp'] >= (now - timedelta(days=1))]
     return True
 
 # ----------------------------
-# Polling Loop (With New Logic)
+# Polling Loop
 # ----------------------------
 polling_active = False
 polling_thread = None
 
 def poll_growatt():
     global latest_data, load_history, battery_history, weather_forecast, solar_conditions_cache
-    global polling_active
+    global polling_active, alert_history
     
     if not TOKEN: return
     
@@ -402,11 +394,12 @@ def poll_growatt():
     previous_load_watts = 0
     polling_active = True
     
-    print("🚀 Polling Started: Original Features + Smart Detection")
+    print("🚀 Polling Started: Full Features + Alert History + Persistence")
     
     while polling_active:
         try:
             now = datetime.now(EAT)
+            
             # Weather Refresh
             if (now - last_wx) > timedelta(minutes=30):
                 weather_forecast = get_weather_forecast()
@@ -447,14 +440,23 @@ def poll_growatt():
                         elif cfg['type'] == 'backup':
                             b_data = info
                             if float(d.get("vac") or 0) > 100 or float(d.get("pAcInPut") or 0) > 50: gen_on = True
-                except: pass
+                        
+                        if flt: send_email(f"FAULT: {cfg['label']}", "Inverter reports fault", "fault")
+                        if temp > 60: send_email(f"High Temp: {cfg['label']}", f"{temp}C", "temp")
+                        
+                except Exception as e:
+                    print(f"Error sn {sn}: {e}")
             
             # Data Processing
             p_min = min(p_caps) if p_caps else 0
             b_volts = b_data['vBat'] if b_data else 0
             b_act = b_data['OutputPower'] > 50 if b_data else False
             
-            # --- NEW SMART LOGIC START ---
+            # --- Alert Logic ---
+            if gen_on: send_email("Generator Running", "Generator detected", "gen")
+            if b_act: send_email("Backup Active", "Primary depleted", "backup")
+            
+            # --- Smart Logic ---
             detected_apps = identify_active_appliances(tot_out, previous_load_watts, gen_on, b_volts, p_min)
             
             is_manual_gen_run = any("Manual" in app or "Water" in app for app in detected_apps)
@@ -464,18 +466,17 @@ def poll_growatt():
             if (now - last_save_time) > timedelta(hours=1):
                 load_manager.save_data()
                 last_save_time = now
-            # --- NEW SMART LOGIC END ---
             
-            # Use Persistent Manager for Forecast
+            # Forecasting
             l_cast = load_manager.get_forecast(12)
             
-            # Update Solar Pattern (Old Logic Kept for Solar)
+            # Solar Pattern
             now_h = now.hour
             solar_generation_pattern.append({'hour': now_h, 'generation': tot_sol, 'max_possible': 10000})
             s_pat = analyze_historical_solar_pattern()
             s_cast = generate_solar_forecast(weather_forecast, s_pat)
             
-            # Complex Simulation
+            # Simulation
             pred = calculate_battery_cascade(s_cast, l_cast, p_min, b_act)
             usable = calculate_usable_energy(p_min, max(0, min(100, (b_volts - 51.0) / 2.0 * 100)))
             
@@ -495,16 +496,16 @@ def poll_growatt():
                 "backup_active": b_act,
                 "generator_running": gen_on,
                 "inverters": inv_data,
-                "detected_appliances": detected_apps, # <--- Added
+                "detected_appliances": detected_apps,
                 "solar_forecast": s_cast,
                 "load_forecast": l_cast,
                 "battery_life_prediction": pred,
                 "usable_energy": usable
             }
             
-            print(f"Update: {tot_out}W | Apps: {detected_apps}")
+            print(f"Update: {tot_out}W | Gen: {gen_on} | Alerts: {len(alert_history)}")
             
-        except Exception as e: print(e)
+        except Exception as e: print(f"Poll Error: {e}")
         
         if polling_active:
             for _ in range(POLL_INTERVAL_MINUTES * 60):
@@ -568,9 +569,11 @@ def home():
     chart_load = [x['estimated_load'] for x in l_fc] if l_fc else []
     chart_solar = [x['estimated_generation'] for x in s_fc[:len(l_fc)]] if s_fc else []
     
-    # Logic for Prediction Chart
     sim_t = ["Now"] + [d['time'].strftime('%H:%M') for d in s_fc] if s_fc else []
     trace_pct = pred.get('trace_total_pct', []) if pred else []
+    
+    # Get recent alerts (reverse order)
+    alerts = sorted(alert_history, key=lambda x: x['timestamp'], reverse=True)[:10]
 
     html = """
 <!DOCTYPE html>
@@ -596,18 +599,21 @@ def home():
         
         .metric { font-family: 'Space Mono', monospace; font-size: 1.8rem; font-weight: 600; }
         
-        /* New Detected Tags */
         .app-grid { display: flex; flex-wrap: wrap; gap: 0.8rem; }
         .tag { padding: 0.6rem 1.2rem; border-radius: 50px; font-size: 0.9rem; font-weight: 600; background: rgba(255,255,255,0.05); border: 1px solid var(--border); display: flex; align-items: center; gap: 0.5rem; }
-        .tag.water { border-color: var(--warning); color: var(--warning); box-shadow: 0 0 15px rgba(240,136,62,0.2); }
-        .tag.pool { border-color: var(--info); color: var(--info); box-shadow: 0 0 15px rgba(88,166,255,0.2); }
-        .tag.cook { border-color: var(--danger); color: var(--danger); box-shadow: 0 0 15px rgba(248,81,73,0.2); }
+        .tag.water { border-color: var(--warning); color: var(--warning); }
+        .tag.pool { border-color: var(--info); color: var(--info); }
+        .tag.cook { border-color: var(--danger); color: var(--danger); }
         
-        /* Power Flow SVG Container */
         .flow-container { height: 300px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; justify-items: center; position: relative; }
         .node { width: 80px; height: 80px; background: var(--surface-2); border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 2px solid var(--border); z-index: 2; }
         .node.active { animation: pulse 2s infinite; border-color: var(--primary); }
         @keyframes pulse { 0%{box-shadow: 0 0 0 0 rgba(63,185,80,0.4)} 70%{box-shadow: 0 0 0 10px rgba(63,185,80,0)} 100%{box-shadow: 0 0 0 0 rgba(63,185,80,0)} }
+        
+        .alert-row { display: flex; justify-content: space-between; padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.1); }
+        .alert-time { font-family: 'Space Mono'; opacity: 0.7; }
+        .alert-type.gen { color: var(--danger); }
+        .alert-type.backup { color: var(--warning); }
     </style>
 </head>
 <body>
@@ -641,11 +647,10 @@ def home():
         <div class="span-3 card"><h3>Primary</h3><div class="metric">{{ '%0.f'|format(p_bat) }}%</div></div>
         <div class="span-3 card"><h3>Backup</h3><div class="metric">{{ '%0.1f'|format(b_volt) }}V</div></div>
 
-        <!-- Original Power Flow Visual -->
+        <!-- Power Flow -->
         <div class="span-12 card">
             <h2>⚡ Power Flow</h2>
             <div class="flow-container">
-                <!-- Simple CSS Grid nodes to replace complex SVG logic while keeping look -->
                 <div class="node" style="grid-column:1; grid-row:2">☀️<br>{{ '%0.f'|format(tot_sol) }}W</div>
                 <div class="node {{ 'active' if gen_on else '' }}" style="grid-column:2; grid-row:1">⚙️<br>GEN</div>
                 <div class="node" style="grid-column:2; grid-row:2; width:100px; height:100px; border-color:var(--info)">⚡<br>INV</div>
@@ -656,17 +661,31 @@ def home():
 
         <!-- Charts -->
         <div class="span-6 card">
-            <h2>🔮 12-Hour Forecast (AI Predicted)</h2>
+            <h2>🔮 12-Hour Forecast</h2>
             <div style="height:300px"><canvas id="fcChart"></canvas></div>
         </div>
         <div class="span-6 card">
             <h2>🔋 Capacity Simulation</h2>
             <div style="height:300px"><canvas id="simChart"></canvas></div>
         </div>
+        
+        <!-- RESTORED: Alert History -->
+        <div class="span-12 card">
+            <h2>🔔 Recent Alerts</h2>
+            {% if alerts %}
+                {% for alert in alerts %}
+                    <div class="alert-row">
+                        <div class="alert-type {{ alert.type }}"><strong>{{ alert.subject }}</strong></div>
+                        <div class="alert-time">{{ alert.timestamp.strftime('%H:%M') }}</div>
+                    </div>
+                {% endfor %}
+            {% else %}
+                <div style="opacity:0.5; padding:10px">No active alerts.</div>
+            {% endif %}
+        </div>
     </div>
     
     <script>
-        // Forecast Chart
         new Chart(document.getElementById('fcChart'), {
             type: 'line',
             data: {
@@ -678,7 +697,6 @@ def home():
             }, options: { maintainAspectRatio: false }
         });
         
-        // Simulation Chart
         new Chart(document.getElementById('simChart'), {
             type: 'line',
             data: {
@@ -698,7 +716,7 @@ def home():
         detected=detected, tot_load=tot_load, tot_sol=tot_sol,
         p_bat=p_bat, b_volt=b_volt, usable=usable,
         chart_labels=chart_labels, chart_load=chart_load, chart_solar=chart_solar,
-        sim_t=sim_t, trace_pct=trace_pct, gen_on=gen_on
+        sim_t=sim_t, trace_pct=trace_pct, gen_on=gen_on, alerts=alerts
     )
 
 if __name__ == '__main__':
