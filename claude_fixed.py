@@ -21,6 +21,7 @@ SERIAL_NUMBERS = os.getenv("SERIAL_NUMBERS", "").split(",")
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
 DATA_FILE = "load_patterns.json"
 
+# Inverter Mapping
 INVERTER_CONFIG = {
     "RKG3B0400T": {"label": "Inverter 1", "type": "primary"},
     "KAM4N5W0AG": {"label": "Inverter 2", "type": "primary"},
@@ -118,9 +119,9 @@ def generate_smart_schedule(p_pct, s_forecast, l_forecast):
     for app in APPLIANCE_PROFILES:
         decision = {}
         if is_safe_now:
-             decision = {"msg": "Safe to Run", "status": "safe"}
+             decision = {"msg": "Safe to Run", "status": "safe", "color": "var(--success)"}
         else:
-             decision = {"msg": "Wait for Solar", "status": "unsafe"}
+             decision = {"msg": "Wait for Solar", "status": "unsafe", "color": "var(--warn)"}
              
         advice.append({**app, **decision})
     return advice
@@ -243,7 +244,7 @@ def poll_growatt():
     last_save = datetime.now(EAT)
     polling_active = True
     
-    print("🚀 System Started: UI Polish Mode")
+    print("🚀 System Started: Hybrid Visual Mode")
 
     while polling_active:
         try:
@@ -403,13 +404,38 @@ def home():
         .metric-unit { font-size: 0.9rem; color: var(--text-muted); }
         .tag { padding: 5px 12px; border-radius: 50px; font-size: 0.8rem; font-weight: 700; background: rgba(255,255,255,0.1); border: 1px solid var(--border); display: inline-flex; align-items: center; gap: 6px; margin-right: 5px; }
         
-        /* Modern Control Tiles */
+        /* Power Flow Animation */
+        .flow-diagram { position: relative; height: 300px; width: 100%; display: flex; justify-content: center; align-items: center; }
+        .node { position: absolute; width: 80px; height: 80px; border-radius: 50%; background: #111; border: 2px solid #333; z-index: 2; display: flex; flex-direction: column; align-items: center; justify-content: center; box-shadow: 0 0 20px rgba(0,0,0,0.5); transition: all 0.3s ease; }
+        .node-val { font-family: 'Space Mono'; font-size: 11px; font-weight: bold; }
+        .n-solar { top: 10px; left: 50%; transform: translateX(-50%); border-color: var(--warn); }
+        .n-inv   { top: 50%; left: 50%; transform: translate(-50%, -50%); width: 100px; height: 100px; border-color: var(--info); }
+        .n-home  { top: 50%; right: 10%; transform: translateY(-50%); border-color: var(--info); }
+        .n-bat   { bottom: 10px; left: 50%; transform: translateX(-50%); border-color: var(--success); }
+        .n-gen   { top: 50%; left: 10%; transform: translateY(-50%); border-color: var(--crit); }
+        
+        .line { position: absolute; background: #333; z-index: 1; overflow: hidden; }
+        .line-v { width: 4px; height: 80px; left: 50%; transform: translateX(-50%); }
+        .l-solar { top: 90px; } .l-bat { bottom: 90px; }
+        .line-h { height: 4px; width: 25%; top: 50%; transform: translateY(-50%); }
+        .l-gen { left: 18%; } .l-home { right: 18%; }
+        
+        .dot { position: absolute; background: #fff; border-radius: 50%; width: 6px; height: 6px; box-shadow: 0 0 10px #fff; opacity: 0; }
+        .flow-down .dot { left: -1px; animation: flowY 1.5s linear infinite; opacity: 1; }
+        .flow-up .dot { left: -1px; animation: flowY-rev 1.5s linear infinite; opacity: 1; }
+        .flow-right .dot { top: -1px; animation: flowX 1.5s linear infinite; opacity: 1; }
+        @keyframes flowY { 0%{top:0%} 100%{top:100%} } @keyframes flowY-rev { 0%{top:100%} 100%{top:0%} } @keyframes flowX { 0%{left:0%} 100%{left:100%} }
+        .pulse-g { animation: p-g 2s infinite; } .pulse-r { animation: p-r 2s infinite; } .pulse-y { animation: p-y 2s infinite; }
+        @keyframes p-g { 0%{box-shadow:0 0 0 0 rgba(0,255,0,0.4)} 70%{box-shadow:0 0 0 15px rgba(0,255,0,0)} 100%{box-shadow:0 0 0 0 rgba(0,255,0,0)} }
+        @keyframes p-r { 0%{box-shadow:0 0 0 0 rgba(255,0,0,0.4)} 70%{box-shadow:0 0 0 15px rgba(255,0,0,0)} 100%{box-shadow:0 0 0 0 rgba(255,0,0,0)} }
+        @keyframes p-y { 0%{box-shadow:0 0 0 0 rgba(255,165,0,0.4)} 70%{box-shadow:0 0 0 15px rgba(255,165,0,0)} 100%{box-shadow:0 0 0 0 rgba(255,165,0,0)} }
+
+        /* Scenario Controls */
         .sched-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }
         .sched-tile { 
             background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 16px; padding: 15px;
             display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
             cursor: pointer; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            position: relative; overflow: hidden;
         }
         .sched-tile:hover { background: rgba(255,255,255,0.08); transform: translateY(-2px); }
         .sched-tile.active { border-color: var(--info); background: rgba(0, 191, 255, 0.15); box-shadow: 0 0 20px rgba(0, 191, 255, 0.2); }
@@ -423,29 +449,45 @@ def home():
 <body>
     <div class="grid">
         <div class="col-12" style="display:flex; justify-content:space-between; align-items:center;">
-            <div><h1 style="margin:0; font-size:1.4rem">SCENARIO PLANNER</h1><span style="color:{{ st_col }}">{{ st_txt }}</span></div>
+            <div><h1 style="margin:0; font-size:1.4rem">SOLAR MONITOR</h1><span style="color:{{ st_col }}">{{ st_txt }}</span></div>
             <div style="font-family:'Space Mono'; font-size:1.2rem">{{ d.timestamp.split(' ')[1] }}</div>
         </div>
 
-        <!-- Metrics -->
+        <!-- VISUAL POWER FLOW -->
+        <div class="col-12 card" style="padding:0; overflow:hidden">
+            <div class="flow-diagram">
+                <div class="line line-v l-solar {{ 'flow-down' if solar > 50 else '' }}"><div class="dot"></div></div>
+                <div class="line line-v l-bat {{ 'flow-down' if is_charging else ('flow-up' if is_discharging else '') }}"><div class="dot"></div></div>
+                <div class="line line-h l-home {{ 'flow-right' if load > 100 else '' }}"><div class="dot"></div></div>
+                <div class="line line-h l-gen {{ 'flow-right' if gen_on else '' }}"><div class="dot"></div></div>
+                
+                <div class="node n-solar {{ 'pulse-y' if solar > 50 else '' }}"><div>☀️</div><div class="node-val">{{ '%0.f'|format(solar) }}W</div></div>
+                <div class="node n-gen {{ 'pulse-r' if gen_on else '' }}"><div>⚙️</div><div class="node-val">{{ 'ON' if gen_on else 'OFF' }}</div></div>
+                <div class="node n-inv"><div>⚡</div><div class="node-val">INV</div></div>
+                <div class="node n-home {{ 'pulse-g' if load > 2000 else '' }}"><div>🏠</div><div class="node-val">{{ '%0.f'|format(load) }}W</div></div>
+                <div class="node n-bat {{ 'pulse-g' if is_charging else ('pulse-r' if is_discharging else '') }}"><div>🔋</div><div class="node-val">{{ breakdown.total_pct }}%</div></div>
+            </div>
+        </div>
+
+        <!-- KEY METRICS -->
         <div class="col-3 card">
-            <div class="metric-lbl">Solar Input</div>
+            <div class="metric-unit">Solar Input</div>
             <div class="metric-val" style="color:var(--warn)">{{ '%0.f'|format(solar) }}<span style="font-size:1rem">W</span></div>
         </div>
         <div class="col-3 card">
-            <div class="metric-lbl">Current Load</div>
+            <div class="metric-unit">Current Load</div>
             <div class="metric-val" style="color:var(--info)">{{ '%0.f'|format(load) }}<span style="font-size:1rem">W</span></div>
         </div>
         <div class="col-3 card">
-            <div class="metric-lbl">Usable Battery</div>
+            <div class="metric-unit">Usable Battery</div>
             <div class="metric-val" style="color:var(--success)">{{ breakdown.total_pct }}<span style="font-size:1rem">%</span></div>
         </div>
         <div class="col-3 card">
-            <div class="metric-lbl">Grid/Gen</div>
+            <div class="metric-unit">Grid/Gen</div>
             <div class="metric-val" style="color:{{ 'var(--crit)' if gen_on else '#555' }}">{{ 'ON' if gen_on else 'OFF' }}</div>
         </div>
 
-        <!-- NEW: Modern Control Center -->
+        <!-- SCENARIO PLANNER -->
         <div class="col-12 card">
             <h3 style="margin-top:0">Smart Scheduler (Click to Simulate)</h3>
             <div class="sched-grid">
@@ -457,18 +499,16 @@ def home():
                 </div>
                 {% endfor %}
             </div>
-            <div style="margin-top:15px; text-align:right; font-size:0.9rem; color:var(--text-muted)">
-                Simulated Load: <span id="sim-val" style="color:var(--text); font-family:'Space Mono'">0</span> W
-            </div>
+            <div style="margin-top:10px; text-align:right; font-size:0.9rem; opacity:0.7">Simulated: <span id="sim-val">0</span> W</div>
         </div>
 
-        <!-- Interactive Chart -->
+        <!-- PREDICTION CHART -->
         <div class="col-12 card">
             <h3 style="margin-top:0">Battery Projection</h3>
-            <div style="height:300px"><canvas id="simChart"></canvas></div>
+            <div style="height:250px"><canvas id="simChart"></canvas></div>
         </div>
 
-        <!-- Charts Row -->
+        <!-- BOTTOM STATS -->
         <div class="col-4 card">
             <h3 style="margin-top:0">Usable Storage</h3>
             <div style="height:200px"><canvas id="pieChart"></canvas></div>
@@ -605,6 +645,7 @@ def home():
     return render_template_string(html, 
         d=d, solar=solar, load=load, p_pct=p_pct, b_volt=b_volt, 
         gen_on=gen_on, detected=detected, st_txt=st_txt, st_col=st_col,
+        is_charging=is_charging, is_discharging=is_discharging,
         s_fc=s_fc, l_fc=l_fc, sim=sim, breakdown=breakdown, schedule=schedule
     )
 
