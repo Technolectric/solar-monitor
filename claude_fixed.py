@@ -5,6 +5,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from flask import Flask, jsonify, render_template_string
 import requests
+import json
 
 app = Flask(__name__)
 
@@ -120,7 +121,8 @@ def polling_debug():
                     "api_code": data.get("code"),
                     "api_message": data.get("msg", "No message"),
                     "has_data": bool(data.get("data")),
-                    "data_keys": list(data.get("data", {}).keys()) if data.get("data") else []
+                    "data_keys": list(data.get("data", {}).keys()) if data.get("data") else [],
+                    "full_response_keys": list(data.keys())
                 }
                 
                 # Extract some sample data
@@ -137,7 +139,7 @@ def polling_debug():
                 test_result = {
                     "status_code": response.status_code,
                     "error": f"HTTP Error: {response.status_code}",
-                    "response_text": response.text[:200] if response.text else "No response body"
+                    "response_text": response.text[:500] if response.text else "No response body"
                 }
                 
         except requests.exceptions.Timeout:
@@ -177,6 +179,63 @@ def polling_debug():
 def api_data():
     return jsonify(latest_data)
 
+# Test inverter API call with FULL response
+@app.route('/test-fetch-full')
+def test_fetch_full():
+    """Test the Growatt API directly with full response"""
+    if not TOKEN:
+        return jsonify({"error": "API_TOKEN not set"}), 400
+    
+    if len(SERIAL_NUMBERS) == 0:
+        return jsonify({"error": "SERIAL_NUMBERS not set"}), 400
+    
+    try:
+        sn = SERIAL_NUMBERS[0]
+        headers = {"token": TOKEN, "Content-Type": "application/x-www-form-urlencoded"}
+        
+        response = requests.post(
+            API_URL,
+            data={"storage_sn": sn},
+            headers=headers,
+            timeout=10
+        )
+        
+        result = {
+            "status_code": response.status_code,
+            "inverter": sn,
+            "timestamp": datetime.now(timezone(timedelta(hours=3))).isoformat()
+        }
+        
+        if response.status_code == 200:
+            try:
+                data = response.json()
+                result["full_response"] = data
+                result["response_keys"] = list(data.keys())
+                
+                # Check for error_code instead of code
+                if "error_code" in data:
+                    result["api_code"] = data.get("error_code")
+                    result["api_message"] = data.get("error_msg", "")
+                else:
+                    result["api_code"] = data.get("code")
+                    result["api_message"] = data.get("msg", "")
+                    
+            except Exception as e:
+                result["json_error"] = str(e)
+                result["raw_response"] = response.text[:1000]
+        else:
+            result["error"] = f"HTTP {response.status_code}"
+            result["response_text"] = response.text[:1000] if response.text else "No response body"
+            
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "type": type(e).__name__,
+            "timestamp": datetime.now(timezone(timedelta(hours=3))).isoformat()
+        }), 500
+
 # Test inverter API call
 @app.route('/test-fetch')
 def test_fetch():
@@ -206,11 +265,18 @@ def test_fetch():
         
         if response.status_code == 200:
             data = response.json()
-            result["response"] = {
-                "code": data.get("code"),
-                "msg": data.get("msg"),
-                "has_data": bool(data.get("data"))
-            }
+            
+            # Check both possible response formats
+            if "error_code" in data:
+                result["api_format"] = "error_code/error_msg"
+                result["api_code"] = data.get("error_code")
+                result["api_message"] = data.get("error_msg", "")
+                result["has_data"] = bool(data.get("data"))
+            else:
+                result["api_format"] = "code/msg"
+                result["api_code"] = data.get("code")
+                result["api_message"] = data.get("msg", "")
+                result["has_data"] = bool(data.get("data"))
             
             if data.get("data"):
                 # Extract key fields
@@ -255,7 +321,7 @@ def start_polling():
         
         # Start new thread
         polling_thread = threading.Thread(
-            target=poll_growatt,
+            target=poll_growatt_fixed,
             name="polling_thread",
             daemon=True
         )
@@ -284,13 +350,13 @@ def stop_polling():
         "timestamp": datetime.now(timezone(timedelta(hours=3))).isoformat()
     })
 
-# SIMPLE POLLING FUNCTION - FIXED VERSION
-def poll_growatt():
-    """Simple polling function that definitely works"""
+# FIXED POLLING FUNCTION - Handles both API response formats
+def poll_growatt_fixed():
+    """Polling function that handles both API response formats"""
     global latest_data, polling_active
     
-    print("🚀 POLL_GROWATT: Starting polling thread...")
-    print(f"✅ API Token present: {'Yes' if TOKEN else 'No'}")
+    print("🚀 POLL_GROWATT_FIXED: Starting polling thread...")
+    print(f"✅ API Token: {'Present' if TOKEN else 'Missing'}")
     print(f"✅ Serial numbers: {SERIAL_NUMBERS}")
     
     polling_active = True
@@ -300,7 +366,9 @@ def poll_growatt():
         try:
             poll_count += 1
             now = datetime.now(timezone(timedelta(hours=3)))
-            print(f"\n=== POLL #{poll_count} at {now.strftime('%H:%M:%S')} ===")
+            print(f"\n{'='*50}")
+            print(f"📊 POLL #{poll_count} at {now.strftime('%H:%M:%S')}")
+            print(f"{'='*50}")
             
             # Initialize
             inv_data = []
@@ -308,7 +376,7 @@ def poll_growatt():
             
             for sn in SERIAL_NUMBERS:
                 try:
-                    print(f"  📡 Polling {sn}...")
+                    print(f"\n  🔄 Polling {sn}...")
                     headers = {"token": TOKEN, "Content-Type": "application/x-www-form-urlencoded"}
                     
                     response = requests.post(
@@ -318,59 +386,105 @@ def poll_growatt():
                         timeout=15
                     )
                     
-                    print(f"  📊 Response: {response.status_code}")
+                    print(f"  📡 HTTP Status: {response.status_code}")
                     
                     if response.status_code == 200:
-                        data = response.json()
-                        print(f"  📋 API Code: {data.get('code', 'No code')}")
-                        
-                        if data.get("code") == 0 and data.get("data"):
-                            d = data["data"]
+                        try:
+                            data = response.json()
+                            print(f"  📋 Response keys: {list(data.keys())}")
                             
-                            # Extract data with defaults
-                            op = float(d.get("outPutPower") or 0)
-                            cap = float(d.get("capacity") or 0)
-                            vb = float(d.get("vBat") or 0)
-                            pb = float(d.get("pBat") or 0)
-                            sol = float(d.get("ppv") or 0)
-                            
-                            print(f"  📈 Data: {op}W, {cap}%, {vb}V, {sol}W")
-                            
-                            # Determine label
-                            if "RKG" in sn:
-                                label = "Inverter 1"
-                                inv_type = "primary"
-                            elif "KAM" in sn:
-                                label = "Inverter 2"
-                                inv_type = "primary"
+                            # Check which response format we have
+                            if "error_code" in data:
+                                api_code = data.get("error_code")
+                                api_msg = data.get("error_msg", "No message")
+                                response_format = "error_code/error_msg"
                             else:
-                                label = "Inverter 3 (Backup)"
-                                inv_type = "backup"
+                                api_code = data.get("code")
+                                api_msg = data.get("msg", "No message")
+                                response_format = "code/msg"
                             
-                            inv_data.append({
-                                "SN": sn,
-                                "Label": label,
-                                "Type": inv_type,
-                                "OutputPower": op,
-                                "Capacity": cap,
-                                "vBat": vb,
-                                "pBat": pb,
-                                "ppv": sol,
-                                "Status": d.get("statusText", "Unknown"),
-                                "has_fault": False
-                            })
+                            print(f"  📝 API Format: {response_format}")
+                            print(f"  📝 API Code: {api_code}, Message: {api_msg}")
                             
-                            successful_polls += 1
-                            print(f"  ✅ Success: {label}")
-                        else:
-                            print(f"  ❌ API error: {data.get('msg', 'Unknown error')}")
+                            # Check if API call was successful
+                            # Some APIs use 0 for success, some might use "0" or True
+                            is_success = False
+                            if api_code is not None:
+                                if isinstance(api_code, int):
+                                    is_success = api_code == 0
+                                elif isinstance(api_code, str):
+                                    is_success = api_code == "0" or api_code.lower() == "success"
+                            else:
+                                # If no code field, assume success if we have data
+                                is_success = bool(data.get("data"))
+                            
+                            if is_success and data.get("data"):
+                                d = data["data"]
+                                
+                                # Extract data with safe defaults
+                                op = float(d.get("outPutPower") or 0)
+                                cap = float(d.get("capacity") or 0)
+                                vb = float(d.get("vBat") or 0)
+                                pb = float(d.get("pBat") or 0)
+                                sol = float(d.get("ppv") or 0)
+                                sol2 = float(d.get("ppv2") or 0)
+                                total_sol = sol + sol2
+                                
+                                print(f"  📈 Extracted Data:")
+                                print(f"     - Output Power: {op}W")
+                                print(f"     - Capacity: {cap}%")
+                                print(f"     - Battery Voltage: {vb}V")
+                                print(f"     - Battery Power: {pb}W")
+                                print(f"     - Solar PV1: {sol}W, PV2: {sol2}W, Total: {total_sol}W")
+                                
+                                # Determine label
+                                if "RKG" in sn:
+                                    label = "Inverter 1"
+                                    inv_type = "primary"
+                                elif "KAM" in sn:
+                                    label = "Inverter 2"
+                                    inv_type = "primary"
+                                else:
+                                    label = "Inverter 3 (Backup)"
+                                    inv_type = "backup"
+                                
+                                inv_data.append({
+                                    "SN": sn,
+                                    "Label": label,
+                                    "Type": inv_type,
+                                    "OutputPower": op,
+                                    "Capacity": cap,
+                                    "vBat": vb,
+                                    "pBat": pb,
+                                    "ppv": total_sol,
+                                    "Status": d.get("statusText", "Unknown"),
+                                    "has_fault": False
+                                })
+                                
+                                successful_polls += 1
+                                print(f"  ✅ SUCCESS: {label}")
+                            else:
+                                print(f"  ❌ API Error: Code={api_code}, Msg={api_msg}")
+                                if not data.get("data"):
+                                    print(f"  ⚠️  No data field in response")
+                                    
+                        except json.JSONDecodeError as e:
+                            print(f"  ❌ JSON Decode Error: {e}")
+                            print(f"  📄 Raw response (first 500 chars): {response.text[:500]}")
+                        except Exception as e:
+                            print(f"  ❌ Error parsing response: {e}")
                     else:
-                        print(f"  ❌ HTTP error: {response.status_code}")
+                        print(f"  ❌ HTTP Error: {response.status_code}")
+                        print(f"  📄 Response: {response.text[:200] if response.text else 'No body'}")
                         
+                except requests.exceptions.Timeout:
+                    print(f"  ⏱️  Timeout for {sn}")
+                except requests.exceptions.ConnectionError:
+                    print(f"  🔌 Connection error for {sn}")
                 except Exception as e:
-                    print(f"  ❌ Error polling {sn}: {str(e)[:100]}")
+                    print(f"  ❌ Unexpected error for {sn}: {str(e)[:100]}")
             
-            print(f"  📊 Results: {successful_polls}/{len(SERIAL_NUMBERS)} successful")
+            print(f"\n  📊 SUMMARY: {successful_polls}/{len(SERIAL_NUMBERS)} successful polls")
             
             # Calculate totals
             if inv_data:
@@ -411,9 +525,13 @@ def poll_growatt():
                     }
                 })
                 
-                print(f"📊 Load: {total_power:.0f}W | Solar: {total_solar:.0f}W | Battery: {p_min}% | Usable: {total_pct:.0f}%")
+                print(f"\n  📈 FINAL TOTALS:")
+                print(f"     Load: {total_power:.0f}W")
+                print(f"     Solar: {total_solar:.0f}W")
+                print(f"     Battery: {p_min}%")
+                print(f"     Usable: {total_pct:.0f}% ({total_kwh:.1f} kWh)")
             else:
-                print("⚠️ No inverter data collected")
+                print("⚠️  No inverter data collected")
                 latest_data["status"] = f"No data (Poll #{poll_count})"
                 latest_data["timestamp"] = now.strftime("%Y-%m-%d %H:%M:%S EAT")
             
@@ -424,13 +542,17 @@ def poll_growatt():
         
         # Wait for next poll
         if polling_active:
-            print(f"⏳ Waiting {POLL_INTERVAL_MINUTES} minutes...")
+            print(f"\n⏳ Waiting {POLL_INTERVAL_MINUTES} minutes until next poll...")
             for i in range(POLL_INTERVAL_MINUTES * 60):
                 if not polling_active:
                     break
+                if i % 30 == 0:  # Print progress every 30 seconds
+                    mins_left = (POLL_INTERVAL_MINUTES * 60 - i) // 60
+                    secs_left = (POLL_INTERVAL_MINUTES * 60 - i) % 60
+                    print(f"   Next poll in: {mins_left}m {secs_left}s")
                 time.sleep(1)
     
-    print("🛑 POLL_GROWATT: Thread stopped")
+    print("🛑 POLL_GROWATT_FIXED: Thread stopped")
 
 # Main page with auto-start
 @app.route('/')
@@ -465,6 +587,7 @@ def home():
             .status-inactive { background: #64748b; color: white; }
             .data-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 10px; }
             .data-item { background: rgba(0,0,0,0.2); padding: 10px; border-radius: 5px; }
+            .log-output { background: #000; color: #0f0; padding: 10px; border-radius: 5px; font-family: monospace; height: 200px; overflow-y: auto; }
         </style>
     </head>
     <body>
@@ -516,12 +639,26 @@ def home():
             </div>
             
             <div class="card">
-                <h2>System Info</h2>
+                <h2>Quick Links & Diagnostics</h2>
+                <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                    <a href="/test"><button>Test Endpoint</button></a>
+                    <a href="/debug"><button>Debug Info</button></a>
+                    <a href="/api/data"><button>API Data</button></a>
+                    <a href="/test-fetch"><button>Test API Call</button></a>
+                    <a href="/test-fetch-full"><button style="background: #f59e0b;">Full API Test</button></a>
+                    <a href="/polling-debug"><button>Polling Debug</button></a>
+                    <a href="/start-polling"><button>Start Polling</button></a>
+                    <a href="/stop-polling"><button>Stop Polling</button></a>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>Debug Information</h2>
                 <div class="grid">
                     <div>
-                        <h3>Backup System</h3>
-                        <p>Voltage: <span id="backup-voltage">0</span> V</p>
-                        <p>Status: <span id="backup-status" class="status-inactive status-badge">INACTIVE</span></p>
+                        <h3>API Status</h3>
+                        <p>Token: <span id="token-status" class="status-inactive status-badge">UNKNOWN</span></p>
+                        <p>Inverters: <span id="serial-count">0</span> configured</p>
                     </div>
                     <div>
                         <h3>Polling</h3>
@@ -529,23 +666,10 @@ def home():
                         <p>Last Success: <span id="last-success">--:--:--</span></p>
                     </div>
                     <div>
-                        <h3>API Status</h3>
-                        <p>Token: <span id="token-status" class="status-inactive status-badge">UNKNOWN</span></p>
-                        <p>Inverters: <span id="serial-count">0</span> configured</p>
+                        <h3>Backup System</h3>
+                        <p>Voltage: <span id="backup-voltage">0</span> V</p>
+                        <p>Status: <span id="backup-status" class="status-inactive status-badge">INACTIVE</span></p>
                     </div>
-                </div>
-            </div>
-            
-            <div class="card">
-                <h2>Quick Links & Diagnostics</h2>
-                <div style="display: flex; flex-wrap: wrap; gap: 10px;">
-                    <a href="/test"><button>Test Endpoint</button></a>
-                    <a href="/debug"><button>Debug Info</button></a>
-                    <a href="/api/data"><button>API Data</button></a>
-                    <a href="/test-fetch"><button>Test API Call</button></a>
-                    <a href="/polling-debug"><button>Polling Debug</button></a>
-                    <a href="/start-polling"><button>Start Polling (API)</button></a>
-                    <a href="/stop-polling"><button>Stop Polling (API)</button></a>
                 </div>
             </div>
         </div>
