@@ -1885,7 +1885,11 @@ def home():
 # ================ RAILWAY/PRODUCTION SETTINGS ================
 if __name__ == "__main__":
     import os
+    import time  # ADD THIS LINE
     port = int(os.environ.get("PORT", 10000))
+    
+    # RAILWAY FIX: Wait 10 seconds before starting heavy polling
+    time.sleep(10)  # ADD THIS LINE
     
     # Start polling thread
     from threading import Thread
@@ -1894,5 +1898,4 @@ if __name__ == "__main__":
     print(f"Started polling thread. Server starting on port {port}")
     
     # Run the app
-
     app.run(host="0.0.0.0", port=port, debug=False)
