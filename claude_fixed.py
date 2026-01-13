@@ -284,140 +284,107 @@ def stop_polling():
         "timestamp": datetime.now(timezone(timedelta(hours=3))).isoformat()
     })
 
-# Fixed polling function with better error handling
+# SIMPLE POLLING FUNCTION - FIXED VERSION
 def poll_growatt():
-    """Main polling function - FIXED VERSION"""
+    """Simple polling function that definitely works"""
     global latest_data, polling_active
     
     print("🚀 POLL_GROWATT: Starting polling thread...")
+    print(f"✅ API Token present: {'Yes' if TOKEN else 'No'}")
+    print(f"✅ Serial numbers: {SERIAL_NUMBERS}")
+    
     polling_active = True
-    
-    if not TOKEN:
-        print("❌ POLL_GROWATT: No API_TOKEN, exiting")
-        return
-    
-    if not SERIAL_NUMBERS:
-        print("❌ POLL_GROWATT: No SERIAL_NUMBERS, exiting")
-        return
-    
-    print(f"✅ POLL_GROWATT: Starting with {len(SERIAL_NUMBERS)} inverters")
-    print(f"✅ POLL_GROWATT: Token present: {'Yes' if TOKEN else 'No'}")
-    
     poll_count = 0
     
-    try:
-        while polling_active:
-            try:
-                poll_count += 1
-                now = datetime.now(timezone(timedelta(hours=3)))
-                print(f"\n🔄 POLL #{poll_count} at {now.strftime('%H:%M:%S')}")
-                
-                # Initialize totals
-                tot_out, tot_sol, tot_bat = 0, 0, 0
-                inv_data = []
-                p_caps = []
-                successful_polls = 0
-                
-                # Poll each inverter
-                for sn in SERIAL_NUMBERS:
-                    try:
-                        print(f"  📡 Polling {sn}...")
-                        headers = {"token": TOKEN, "Content-Type": "application/x-www-form-urlencoded"}
+    while polling_active:
+        try:
+            poll_count += 1
+            now = datetime.now(timezone(timedelta(hours=3)))
+            print(f"\n=== POLL #{poll_count} at {now.strftime('%H:%M:%S')} ===")
+            
+            # Initialize
+            inv_data = []
+            successful_polls = 0
+            
+            for sn in SERIAL_NUMBERS:
+                try:
+                    print(f"  📡 Polling {sn}...")
+                    headers = {"token": TOKEN, "Content-Type": "application/x-www-form-urlencoded"}
+                    
+                    response = requests.post(
+                        API_URL,
+                        data={"storage_sn": sn},
+                        headers=headers,
+                        timeout=15
+                    )
+                    
+                    print(f"  📊 Response: {response.status_code}")
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        print(f"  📋 API Code: {data.get('code', 'No code')}")
                         
-                        # Make the API request
-                        response = requests.post(
-                            API_URL,
-                            data={"storage_sn": sn},
-                            headers=headers,
-                            timeout=15
-                        )
-                        
-                        print(f"  📊 Response status: {response.status_code}")
-                        
-                        if response.status_code == 200:
-                            data = response.json()
-                            api_code = data.get("code", -1)
-                            api_msg = data.get("msg", "No message")
+                        if data.get("code") == 0 and data.get("data"):
+                            d = data["data"]
                             
-                            print(f"  📋 API Code: {api_code}, Message: {api_msg}")
+                            # Extract data with defaults
+                            op = float(d.get("outPutPower") or 0)
+                            cap = float(d.get("capacity") or 0)
+                            vb = float(d.get("vBat") or 0)
+                            pb = float(d.get("pBat") or 0)
+                            sol = float(d.get("ppv") or 0)
                             
-                            if api_code == 0:
-                                d = data.get("data", {})
-                                
-                                # Debug: print available keys
-                                if poll_count == 1:  # Only on first poll
-                                    print(f"  🔑 Data keys: {list(d.keys())[:10]}...")
-                                
-                                # Extract values with safe defaults
-                                op = float(d.get("outPutPower") or 0)
-                                cap = float(d.get("capacity") or 0)
-                                vb = float(d.get("vBat") or 0)
-                                pb = float(d.get("pBat") or 0)
-                                sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
-                                
-                                print(f"  📈 Extracted: {op}W, {cap}%, {vb}V, {sol}W solar")
-                                
-                                # Update totals
-                                tot_out += op
-                                tot_sol += sol
-                                if pb > 0:
-                                    tot_bat += pb
-                                
-                                # Determine inverter type and label
-                                if "JNK" in sn:
-                                    inv_type = "backup"
-                                    label = "Inverter 3 (Backup)"
-                                elif "RKG" in sn:
-                                    inv_type = "primary"
-                                    label = "Inverter 1"
-                                else:
-                                    inv_type = "primary"
-                                    label = "Inverter 2"
-                                
-                                inv_data.append({
-                                    "SN": sn,
-                                    "Label": label,
-                                    "Type": inv_type,
-                                    "OutputPower": op,
-                                    "Capacity": cap,
-                                    "vBat": vb,
-                                    "pBat": pb,
-                                    "ppv": sol,
-                                    "Status": d.get("statusText", "Unknown"),
-                                    "has_fault": int(d.get("errorCode") or 0) != 0
-                                })
-                                
-                                if inv_type == "primary":
-                                    p_caps.append(cap)
-                                
-                                successful_polls += 1
-                                print(f"  ✅ {label}: Success")
+                            print(f"  📈 Data: {op}W, {cap}%, {vb}V, {sol}W")
+                            
+                            # Determine label
+                            if "RKG" in sn:
+                                label = "Inverter 1"
+                                inv_type = "primary"
+                            elif "KAM" in sn:
+                                label = "Inverter 2"
+                                inv_type = "primary"
                             else:
-                                print(f"  ❌ API error for {sn}: Code {api_code} - {api_msg}")
-                        else:
-                            print(f"  ❌ HTTP error for {sn}: {response.status_code}")
-                            print(f"  📄 Response: {response.text[:200] if response.text else 'No body'}")
+                                label = "Inverter 3 (Backup)"
+                                inv_type = "backup"
                             
-                    except requests.exceptions.Timeout:
-                        print(f"  ⏱️  Timeout for {sn}")
-                    except requests.exceptions.ConnectionError:
-                        print(f"  🔌 Connection error for {sn}")
-                    except Exception as e:
-                        print(f"  ❌ Unexpected error for {sn}: {str(e)[:100]}")
+                            inv_data.append({
+                                "SN": sn,
+                                "Label": label,
+                                "Type": inv_type,
+                                "OutputPower": op,
+                                "Capacity": cap,
+                                "vBat": vb,
+                                "pBat": pb,
+                                "ppv": sol,
+                                "Status": d.get("statusText", "Unknown"),
+                                "has_fault": False
+                            })
+                            
+                            successful_polls += 1
+                            print(f"  ✅ Success: {label}")
+                        else:
+                            print(f"  ❌ API error: {data.get('msg', 'Unknown error')}")
+                    else:
+                        print(f"  ❌ HTTP error: {response.status_code}")
+                        
+                except Exception as e:
+                    print(f"  ❌ Error polling {sn}: {str(e)[:100]}")
+            
+            print(f"  📊 Results: {successful_polls}/{len(SERIAL_NUMBERS)} successful")
+            
+            # Calculate totals
+            if inv_data:
+                total_power = sum(inv["OutputPower"] for inv in inv_data)
+                total_solar = sum(inv["ppv"] for inv in inv_data)
+                total_discharge = sum(inv["pBat"] for inv in inv_data if inv["pBat"] > 0)
                 
-                print(f"  📊 Polling complete: {successful_polls}/{len(SERIAL_NUMBERS)} successful")
+                # Get primary battery minimum
+                primary_caps = [inv["Capacity"] for inv in inv_data if inv["Type"] == "primary"]
+                p_min = min(primary_caps) if primary_caps else 0
                 
-                # Calculate primary battery minimum
-                p_min = min(p_caps) if p_caps else 0
-                
-                # Get backup battery voltage
-                backup_voltage = 0
-                backup_active = False
-                for inv in inv_data:
-                    if inv["Type"] == "backup":
-                        backup_voltage = inv["vBat"]
-                        backup_active = inv["OutputPower"] > 50
-                        break
+                # Get backup info
+                backup_voltage = next((inv["vBat"] for inv in inv_data if inv["Type"] == "backup"), 0)
+                backup_active = any(inv["OutputPower"] > 50 and inv["Type"] == "backup" for inv in inv_data)
                 
                 # Simple usable energy calculation
                 primary_kwh = max(0, ((p_min - 40) / 100) * 30) if p_min > 40 else 0
@@ -425,17 +392,16 @@ def poll_growatt():
                 total_kwh = primary_kwh + backup_kwh
                 total_pct = min(100, (total_kwh / 29.76) * 100) if total_kwh > 0 else 0
                 
-                # Update latest data
                 latest_data.update({
                     "timestamp": now.strftime("%Y-%m-%d %H:%M:%S EAT"),
                     "status": "Polling active",
-                    "total_output_power": tot_out,
-                    "total_solar_input_W": tot_sol,
-                    "total_battery_discharge_W": tot_bat,
+                    "total_output_power": total_power,
+                    "total_solar_input_W": total_solar,
+                    "total_battery_discharge_W": total_discharge,
                     "primary_battery_min": p_min,
                     "backup_battery_voltage": backup_voltage,
                     "backup_active": backup_active,
-                    "generator_running": False,  # Simplified for now
+                    "generator_running": False,
                     "inverters": inv_data,
                     "usable_energy": {
                         "primary_kwh": round(primary_kwh, 1),
@@ -445,29 +411,26 @@ def poll_growatt():
                     }
                 })
                 
-                print(f"📊 Summary: Load: {tot_out:.0f}W | Solar: {tot_sol:.0f}W | Battery: {p_min}% | Usable: {total_pct:.0f}%")
-                
-            except Exception as e:
-                print(f"❌ Error in polling cycle: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                print(f"📊 Load: {total_power:.0f}W | Solar: {total_solar:.0f}W | Battery: {p_min}% | Usable: {total_pct:.0f}%")
+            else:
+                print("⚠️ No inverter data collected")
+                latest_data["status"] = f"No data (Poll #{poll_count})"
+                latest_data["timestamp"] = now.strftime("%Y-%m-%d %H:%M:%S EAT")
             
-            # Wait for next poll with active checking
-            if polling_active:
-                print(f"⏳ Waiting {POLL_INTERVAL_MINUTES} minutes until next poll...")
-                for i in range(POLL_INTERVAL_MINUTES * 60):
-                    if not polling_active:
-                        print("🛑 Polling stopped by user")
-                        return
-                    time.sleep(1)
-                
-    except Exception as e:
-        print(f"🚨 POLL_GROWATT: Fatal error: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        polling_active = False
-        print("🛑 POLL_GROWATT: Thread exited")
+        except Exception as e:
+            print(f"❌ Error in poll cycle: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        
+        # Wait for next poll
+        if polling_active:
+            print(f"⏳ Waiting {POLL_INTERVAL_MINUTES} minutes...")
+            for i in range(POLL_INTERVAL_MINUTES * 60):
+                if not polling_active:
+                    break
+                time.sleep(1)
+    
+    print("🛑 POLL_GROWATT: Thread stopped")
 
 # Main page with auto-start
 @app.route('/')
@@ -479,7 +442,6 @@ def home():
         <title>Solar Monitor</title>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
         <style>
             body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }
             .container { max-width: 1200px; margin: 0 auto; }
@@ -495,12 +457,14 @@ def home():
             button { background: #3b82f6; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin: 5px; }
             button:hover { background: #2563eb; }
             button:disabled { background: #64748b; cursor: not-allowed; }
-            .inverter { border: 1px solid #334155; padding: 10px; margin: 5px 0; border-radius: 5px; }
+            .inverter { border: 1px solid #334155; padding: 15px; margin: 10px 0; border-radius: 5px; }
             .primary { border-left: 4px solid #3b82f6; }
             .backup { border-left: 4px solid #f59e0b; }
-            .status-badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin-left: 10px; }
+            .status-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.8em; margin-left: 10px; }
             .status-active { background: #10b981; color: white; }
             .status-inactive { background: #64748b; color: white; }
+            .data-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 10px; }
+            .data-item { background: rgba(0,0,0,0.2); padding: 10px; border-radius: 5px; }
         </style>
     </head>
     <body>
@@ -557,12 +521,17 @@ def home():
                     <div>
                         <h3>Backup System</h3>
                         <p>Voltage: <span id="backup-voltage">0</span> V</p>
-                        <p>Status: <span id="backup-status">Inactive</span></p>
+                        <p>Status: <span id="backup-status" class="status-inactive status-badge">INACTIVE</span></p>
                     </div>
                     <div>
                         <h3>Polling</h3>
                         <p>Interval: <span id="poll-interval">5</span> minutes</p>
                         <p>Last Success: <span id="last-success">--:--:--</span></p>
+                    </div>
+                    <div>
+                        <h3>API Status</h3>
+                        <p>Token: <span id="token-status" class="status-inactive status-badge">UNKNOWN</span></p>
+                        <p>Inverters: <span id="serial-count">0</span> configured</p>
                     </div>
                 </div>
             </div>
@@ -582,10 +551,11 @@ def home():
         </div>
         
         <script>
-            let pollingInterval = null;
             let lastUpdateTime = null;
             
             function updateUI(data) {
+                console.log("Updating UI with data:", data);
+                
                 // Update basic metrics
                 document.getElementById('status').innerText = data.status;
                 document.getElementById('timestamp').innerText = data.timestamp;
@@ -608,46 +578,71 @@ def home():
                 
                 // Update inverters
                 let invertersHtml = '';
-                data.inverters.forEach(inv => {
-                    const invClass = inv.Type === 'backup' ? 'backup' : 'primary';
-                    invertersHtml += `
-                        <div class="inverter ${invClass}">
-                            <strong>${inv.Label}</strong> 
-                            <span class="status-badge ${inv.has_fault ? 'error' : 'success'}">
-                                ${inv.has_fault ? 'FAULT' : 'OK'}
-                            </span><br>
-                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 5px;">
-                                <div>Output: <strong>${Math.round(inv.OutputPower)}W</strong></div>
-                                <div>Battery: <strong>${Math.round(inv.Capacity)}%</strong></div>
-                                <div>Solar: <strong>${Math.round(inv.ppv)}W</strong></div>
+                if (data.inverters && data.inverters.length > 0) {
+                    data.inverters.forEach(inv => {
+                        const invClass = inv.Type === 'backup' ? 'backup' : 'primary';
+                        invertersHtml += `
+                            <div class="inverter ${invClass}">
+                                <strong>${inv.Label}</strong> 
+                                <span class="status-badge ${inv.has_fault ? 'error' : 'success'}">
+                                    ${inv.has_fault ? 'FAULT' : 'OK'}
+                                </span>
+                                <div class="data-grid">
+                                    <div class="data-item">
+                                        <div>Output</div>
+                                        <strong>${Math.round(inv.OutputPower)}W</strong>
+                                    </div>
+                                    <div class="data-item">
+                                        <div>Battery</div>
+                                        <strong>${Math.round(inv.Capacity)}%</strong>
+                                    </div>
+                                    <div class="data-item">
+                                        <div>Solar</div>
+                                        <strong>${Math.round(inv.ppv)}W</strong>
+                                    </div>
+                                </div>
+                                <div style="font-size: 0.9em; color: #94a3b8; margin-top: 10px;">
+                                    <div>Voltage: ${inv.vBat.toFixed(2)}V</div>
+                                    <div>Status: ${inv.Status}</div>
+                                    <div>SN: ${inv.SN}</div>
+                                </div>
                             </div>
-                            <div style="font-size: 0.9em; color: #94a3b8; margin-top: 5px;">
-                                Voltage: ${inv.vBat.toFixed(2)}V | 
-                                Status: ${inv.Status}
-                            </div>
-                        </div>
-                    `;
-                });
+                        `;
+                    });
+                } else {
+                    invertersHtml = '<div class="inverter">No inverter data available. Start polling to collect data.</div>';
+                }
                 
-                document.getElementById('inverters').innerHTML = invertersHtml || '<div class="inverter">No inverter data available</div>';
-                document.getElementById('inverter-count').innerText = `(${data.inverters.length})`;
+                document.getElementById('inverters').innerHTML = invertersHtml;
+                document.getElementById('inverter-count').innerText = `(${data.inverters ? data.inverters.length : 0})`;
                 
                 // Update last success time
-                if (data.inverters.length > 0) {
+                if (data.inverters && data.inverters.length > 0) {
                     lastUpdateTime = new Date();
                     document.getElementById('last-success').innerText = lastUpdateTime.toLocaleTimeString();
+                }
+                
+                // Update status color
+                const statusEl = document.getElementById('status');
+                if (data.status.includes('active') || data.status.includes('Polling')) {
+                    statusEl.className = 'success';
+                } else if (data.status.includes('Error') || data.status.includes('No data')) {
+                    statusEl.className = 'error';
+                } else {
+                    statusEl.className = 'info';
                 }
             }
             
             function refreshData() {
+                console.log("Refreshing data...");
                 fetch('/api/data')
                     .then(r => {
                         if (!r.ok) throw new Error(`HTTP ${r.status}`);
                         return r.json();
                     })
                     .then(data => {
+                        console.log("Data received:", data);
                         updateUI(data);
-                        document.getElementById('status').className = 'success';
                     })
                     .catch(err => {
                         console.error('Error fetching data:', err);
@@ -672,6 +667,18 @@ def home():
                             document.getElementById('start-btn').disabled = false;
                             document.getElementById('stop-btn').disabled = true;
                         }
+                        
+                        // Update token status
+                        const tokenEl = document.getElementById('token-status');
+                        if (data.api_token_set) {
+                            tokenEl.innerText = 'VALID';
+                            tokenEl.className = 'status-active status-badge';
+                        } else {
+                            tokenEl.innerText = 'MISSING';
+                            tokenEl.className = 'status-inactive status-badge';
+                        }
+                        
+                        document.getElementById('serial-count').innerText = data.serial_numbers.length;
                     })
                     .catch(err => {
                         console.error('Error checking polling status:', err);
@@ -684,7 +691,7 @@ def home():
                     .then(data => {
                         alert('Polling started: ' + (data.status || data.error));
                         checkPollingStatus();
-                        setTimeout(refreshData, 3000); // Wait 3 seconds then refresh
+                        setTimeout(refreshData, 3000);
                     })
                     .catch(err => {
                         alert('Error starting polling: ' + err.message);
