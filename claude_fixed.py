@@ -12,6 +12,9 @@ from collections import deque
 # Flask app
 # ----------------------------
 app = Flask(__name__)
+@app.route('/health')
+def health_check():
+    return "OK", 200
 
 # ----------------------------
 # Growatt Config (from env)
@@ -1891,4 +1894,5 @@ if __name__ == "__main__":
     print(f"Started polling thread. Server starting on port {port}")
     
     # Run the app
+
     app.run(host="0.0.0.0", port=port, debug=False)
