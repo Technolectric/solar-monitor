@@ -636,9 +636,7 @@ def poll_growatt():
         print(f"🚨 POLL_GROWATT: CRASHED with error: {e}")
         import traceback
         traceback.print_exc()
-        # Restart after crash
-        time.sleep(60)
-        poll_growatt()
+        print("❌ POLL_GROWATT: Thread exiting")
 
 # ----------------------------
 # API Endpoints
@@ -1126,7 +1124,7 @@ def home():
             position: relative;
             width: 100%;
             max-width: 800px;
-            height: 300px;
+            height = 300px;
             aspect-ratio: 16/9;
             display: grid;
             grid-template-columns: 1fr auto 1fr;
