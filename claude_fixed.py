@@ -281,19 +281,21 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
 
         decision = {"msg": "Wait", "status": "unsafe", "color": "var(--warn)", "reason": ""}
 
-        # CRITICAL: Check primary battery threshold for heavy loads (>1500W)
-        if app["watts"] > 1500 and primary_pct <= 75:
-            decision.update({
-                "msg": "Primary Too Low", 
-                "status": "unsafe",
-                "color": "var(--warn)",
-                "reason": f"Primary {primary_pct:.0f}% (need >75% for heavy loads)"
-            })
-        elif battery_soc_pct < 40:
+        # CRITICAL: Check battery level first
+        if battery_soc_pct < 40:
             decision.update({
                 "msg": "Battery Too Low", 
                 "reason": f"System at {battery_soc_pct:.0f}%"
             })
+        # Check if primary is too low for ANY loads
+        elif primary_pct <= 75:
+            decision.update({
+                "msg": "Primary Too Low", 
+                "status": "unsafe",
+                "color": "var(--warn)",
+                "reason": f"Primary {primary_pct:.0f}% - wait for charging"
+            })
+        # Check solar surplus (best case)
         elif solar_surplus_kw >= app_kw and is_daytime:
             decision.update({
                 "msg": "Safe to Run (Solar)", 
@@ -301,18 +303,34 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
                 "color": "var(--success)", 
                 "reason": f"Solar surplus {solar_surplus_kw:.1f} kW"
             })
+        # For heavy loads, require good solar forecast OR high primary battery
+        elif app["watts"] > 1500:
+            if not has_good_solar_window:
+                decision.update({
+                    "msg": "Poor Solar Forecast", 
+                    "status": "unsafe",
+                    "color": "var(--warn)",
+                    "reason": "No good solar window today - avoid heavy loads"
+                })
+            elif primary_pct > 75 and battery_kwh_available >= app_kwh_required * 1.3 and battery_soc_pct >= 60:
+                decision.update({
+                    "msg": "Safe to Run (Battery)", 
+                    "status": "safe", 
+                    "color": "var(--success)", 
+                    "reason": f"Primary {primary_pct:.0f}%, Battery {battery_kwh_available:.1f} kWh"
+                })
+            else:
+                decision.update({
+                    "msg": "Wait for Better Conditions", 
+                    "reason": "Heavy load requires good solar or high battery"
+                })
+        # For moderate loads, allow if battery is sufficient
         elif primary_pct > 75 and battery_kwh_available >= app_kwh_required * 1.3 and battery_soc_pct >= 60:
-            # Only allow battery use if primary >75% for heavy loads
             decision.update({
                 "msg": "Safe to Run (Battery)", 
                 "status": "safe", 
                 "color": "var(--success)", 
-                "reason": f"Primary {primary_pct:.0f}%, Battery {battery_kwh_available:.1f} kWh"
-            })
-        elif not has_good_solar_window and is_daytime:
-            decision.update({
-                "msg": "Poor Solar Forecast", 
-                "reason": "No good solar window today"
+                "reason": f"Battery {battery_kwh_available:.1f} kWh available"
             })
         elif is_daytime:
             decision.update({
