@@ -1334,14 +1334,22 @@ def home():
                         callbacks: {
                             label: function(context) {
                                 let tier;
+                                let scenarioLabel = "";
+
+                                // Determine if this is the "Normal" line or "Simulated" line
                                 if (context.datasetIndex === 1 && simTierData.length > 0) {
                                     tier = simTierData[context.dataIndex];
+                                    scenarioLabel = "With Load"; // Label for the orange line
                                 } else {
                                     tier = tierData[context.dataIndex];
+                                    scenarioLabel = "Normal";    // Label for the green line
                                 }
+
                                 tier = tier || 'unknown';
                                 const tierName = tier.charAt(0).toUpperCase() + tier.slice(1);
-                                return tierName + ': ' + context.parsed.y.toFixed(1) + '%';
+                                
+                                // Return clear format: "Scenario: Value% (Tier)"
+                                return `${scenarioLabel}: ${context.parsed.y.toFixed(1)}% (${tierName})`;
                             }
                         }
                     }
