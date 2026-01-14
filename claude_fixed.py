@@ -185,26 +185,135 @@ def identify_active_appliances(current, previous, gen_active, backup_volts, prim
 # ----------------------------
 
 APPLIANCE_PROFILES = [
-    {"id": "pool", "name": "Pool Pump", "watts": 1200, "hours": 4, "icon": "🏊"},
-    {"id": "wash", "name": "Washer", "watts": 800, "hours": 1.5, "icon": "🧺"},
-    {"id": "oven", "name": "Oven", "watts": 2500, "hours": 1.5, "icon": "🍳"}
+    {
+        "id": "pool",
+        "name": "Pool Pump",
+        "watts": 1200,
+        "hours": 4,
+        "icon": "🏊",
+        "priority": "low"
+    },
+    {
+        "id": "wash",
+        "name": "Washer",
+        "watts": 800,
+        "hours": 1.5,
+        "icon": "🧺",
+        "priority": "medium"
+    },
+    {
+        "id": "oven",
+        "name": "Oven",
+        "watts": 2500,
+        "hours": 1.5,
+        "icon": "🍳",
+        "priority": "high"
+    }
 ]
 
-def generate_smart_schedule(p_pct, s_forecast, l_forecast):
-    """Generates advice with status codes for UI styling."""
-    advice = []
-    is_safe_now = p_pct > 60
-    
-    for app in APPLIANCE_PROFILES:
-        decision = {}
-        if is_safe_now:
-             decision = {"msg": "Safe to Run", "status": "safe", "color": "var(--success)"}
-        else:
-             decision = {"msg": "Wait for Solar", "status": "unsafe", "color": "var(--warn)"}
-             
-        advice.append({**app, **decision})
-    return advice
 
+def generate_smart_schedule(
+    battery_soc_pct,
+    battery_kwh_available,
+    solar_forecast_kw,
+    load_forecast_kw,
+    now_hour=None
+):
+    """
+    Forecast-aware appliance decision engine.
+
+    Inputs:
+    - battery_soc_pct: minimum SOC of primary batteries (%)
+    - battery_kwh_available: usable battery energy (kWh)
+    - solar_forecast_kw: expected solar production (kW, next window)
+    - load_forecast_kw: expected base load (kW, next window)
+    - now_hour: optional hour (0-23) for day/night logic
+    """
+
+    advice = []
+
+    # --------------------------------------------------------
+    # Global conditions
+    # --------------------------------------------------------
+    solar_surplus_kw = max(solar_forecast_kw - load_forecast_kw, 0)
+    is_daytime = now_hour is None or (7 <= now_hour <= 18)
+
+    # Conservative safety floor
+    battery_soc_floor = 40
+
+    for app in APPLIANCE_PROFILES:
+        app_kwh_required = (app["watts"] * app["hours"]) / 1000
+        app_kw = app["watts"] / 1000
+
+        decision = {
+            "msg": "Wait",
+            "status": "unsafe",
+            "color": "var(--warn)",
+            "reason": ""
+        }
+
+        # ----------------------------------------------------
+        # RULE 1: Hard battery protection
+        # ----------------------------------------------------
+        if battery_soc_pct < battery_soc_floor:
+            decision.update({
+                "msg": "Battery Too Low",
+                "reason": f"SOC {battery_soc_pct:.0f}% below safety floor"
+            })
+
+        # ----------------------------------------------------
+        # RULE 2: Solar surplus can run appliance directly
+        # ----------------------------------------------------
+        elif solar_surplus_kw >= app_kw and is_daytime:
+            decision.update({
+                "msg": "Safe to Run (Solar)",
+                "status": "safe",
+                "color": "var(--success)",
+                "reason": f"Solar surplus {solar_surplus_kw:.1f} kW"
+            })
+
+        # ----------------------------------------------------
+        # RULE 3: Battery-backed operation
+        # ----------------------------------------------------
+        elif (
+            battery_kwh_available >= app_kwh_required * 1.3
+            and battery_soc_pct >= 60
+        ):
+            decision.update({
+                "msg": "Safe to Run (Battery)",
+                "status": "safe",
+                "color": "var(--success)",
+                "reason": f"Battery {battery_kwh_available:.1f} kWh available"
+            })
+
+        # ----------------------------------------------------
+        # RULE 4: Suggest waiting for solar window
+        # ----------------------------------------------------
+        elif is_daytime:
+            decision.update({
+                "msg": "Wait for More Solar",
+                "reason": f"Surplus {solar_surplus_kw:.1f} kW < {app_kw:.1f} kW needed"
+            })
+
+        # ----------------------------------------------------
+        # RULE 5: Night-time protection
+        # ----------------------------------------------------
+        else:
+            decision.update({
+                "msg": "Avoid Night Use",
+                "reason": "Nighttime battery preservation"
+            })
+
+        advice.append({
+            **app,
+            "required_kwh": round(app_kwh_required, 2),
+            "decision": decision["msg"],
+            "status": decision["status"],
+            "color": decision["color"],
+            "reason": decision["reason"]
+        })
+
+    return advice
 def calculate_battery_breakdown(p_pct, b_volts):
     """
     Calculates breakdown for circular chart with tiered discharge strategy:
@@ -1560,3 +1669,4 @@ def home():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+
