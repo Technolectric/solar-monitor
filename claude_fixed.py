@@ -184,56 +184,17 @@ def identify_active_appliances(current, previous, gen_active, backup_volts, prim
 # 2. Physics & Scheduler Engine
 # ----------------------------
 
-# ============================================================
-# SMART APPLIANCE SCHEDULER (FORECAST-AWARE DECISION ENGINE)
-# ============================================================
-
 APPLIANCE_PROFILES = [
-    {
-        "id": "pool",
-        "name": "Pool Pump",
-        "watts": 1200,
-        "hours": 4,
-        "icon": "🏊",
-        "priority": "low"
-    },
-    {
-        "id": "wash",
-        "name": "Washer",
-        "watts": 800,
-        "hours": 1.5,
-        "icon": "🧺",
-        "priority": "medium"
-    },
-    {
-        "id": "oven",
-        "name": "Oven",
-        "watts": 2500,
-        "hours": 1.5,
-        "icon": "🍳",
-        "priority": "high"
-    }
+    {"id": "pool", "name": "Pool Pump", "watts": 1200, "hours": 4, "icon": "🏊", "priority": "low"},
+    {"id": "wash", "name": "Washer", "watts": 800, "hours": 1.5, "icon": "🧺", "priority": "medium"},
+    {"id": "oven", "name": "Oven", "watts": 2500, "hours": 1.5, "icon": "🍳", "priority": "high"}
 ]
 
-
-def generate_smart_schedule(
-    battery_soc_pct,
-    battery_kwh_available=None,
-    solar_forecast_kw=0,
-    load_forecast_kw=0,
-    now_hour=None
-):
-    """
-    Backward-compatible smart appliance scheduler.
-    """
-
-    # -----------------------------
-    # Safe defaults (prevents crash)
-    # -----------------------------
+def generate_smart_schedule(battery_soc_pct, battery_kwh_available=None, solar_forecast_kw=0, load_forecast_kw=0, now_hour=None):
+    """Smart appliance scheduler."""
     if battery_kwh_available is None:
         battery_kwh_available = 0
 
-    # FIX: Handle if forecasts are passed as lists (take current hour)
     current_solar_kw = solar_forecast_kw
     if isinstance(solar_forecast_kw, list) and len(solar_forecast_kw) > 0:
         current_solar_kw = solar_forecast_kw[0].get('estimated_generation', 0) / 1000.0
@@ -247,7 +208,6 @@ def generate_smart_schedule(
         current_load_kw = 0
 
     advice = []
-
     solar_surplus_kw = max(current_solar_kw - current_load_kw, 0)
     is_daytime = now_hour is None or (7 <= now_hour <= 18)
     battery_soc_floor = 40
@@ -256,177 +216,104 @@ def generate_smart_schedule(
         app_kw = app["watts"] / 1000
         app_kwh_required = (app["watts"] * app["hours"]) / 1000
 
-        decision = {
-            "msg": "Wait",
-            "status": "unsafe",
-            "color": "var(--warn)",
-            "reason": ""
-        }
+        decision = {"msg": "Wait", "status": "unsafe", "color": "var(--warn)", "reason": ""}
 
-        # -----------------------------
-        # Rule 1: Battery protection
-        # -----------------------------
         if battery_soc_pct < battery_soc_floor:
-            decision.update({
-                "msg": "Battery Too Low",
-                "reason": f"SOC {battery_soc_pct:.0f}% below safety floor"
-            })
-
-        # -----------------------------
-        # Rule 2: Solar surplus
-        # -----------------------------
+            decision.update({"msg": "Battery Too Low", "reason": f"SOC {battery_soc_pct:.0f}% below safety floor"})
         elif solar_surplus_kw >= app_kw and is_daytime:
-            decision.update({
-                "msg": "Safe to Run (Solar)",
-                "status": "safe",
-                "color": "var(--success)",
-                "reason": f"Solar surplus {solar_surplus_kw:.1f} kW"
-            })
-
-        # -----------------------------
-        # Rule 3: Battery-backed run
-        # -----------------------------
-        elif (
-            battery_kwh_available >= app_kwh_required * 1.3
-            and battery_soc_pct >= 60
-        ):
-            decision.update({
-                "msg": "Safe to Run (Battery)",
-                "status": "safe",
-                "color": "var(--success)",
-                "reason": f"Battery {battery_kwh_available:.1f} kWh available"
-            })
-
-        # -----------------------------
-        # Rule 4: Daytime wait
-        # -----------------------------
+            decision.update({"msg": "Safe to Run (Solar)", "status": "safe", "color": "var(--success)", "reason": f"Solar surplus {solar_surplus_kw:.1f} kW"})
+        elif battery_kwh_available >= app_kwh_required * 1.3 and battery_soc_pct >= 60:
+            decision.update({"msg": "Safe to Run (Battery)", "status": "safe", "color": "var(--success)", "reason": f"Battery {battery_kwh_available:.1f} kWh available"})
         elif is_daytime:
-            decision.update({
-                "msg": "Wait for More Solar",
-                "reason": f"Surplus {solar_surplus_kw:.1f} kW < {app_kw:.1f} kW needed"
-            })
-
-        # -----------------------------
-        # Rule 5: Night protection
-        # -----------------------------
+            decision.update({"msg": "Wait for More Solar", "reason": f"Surplus {solar_surplus_kw:.1f} kW < {app_kw:.1f} kW needed"})
         else:
-            decision.update({
-                "msg": "Avoid Night Use",
-                "reason": "Nighttime battery preservation"
-            })
+            decision.update({"msg": "Avoid Night Use", "reason": "Nighttime battery preservation"})
 
-        advice.append({
-            **app,
-            "required_kwh": round(app_kwh_required, 2),
-            "decision": decision["msg"],
-            "status": decision["status"],
-            "color": decision["color"],
-            "reason": decision["reason"]
-        })
+        advice.append({**app, "required_kwh": round(app_kwh_required, 2), "decision": decision["msg"], "status": decision["status"], "color": decision["color"], "reason": decision["reason"]})
 
     return advice
 
 def calculate_battery_breakdown(p_pct, b_volts):
-    """
-    Calculates breakdown for circular chart with tiered discharge strategy:
-    """
-    # Backup battery percentage from voltage
+    """Calculates breakdown for circular chart with tiered discharge strategy."""
     b_pct = max(0, min(100, (b_volts - 51.0) / 2.0 * 100))
+    p_total_wh = PRIMARY_BATTERY_CAPACITY_WH
+    b_total_wh = BACKUP_BATTERY_DEGRADED_WH * BACKUP_DEGRADATION
     
-    # Total capacities
-    p_total_wh = PRIMARY_BATTERY_CAPACITY_WH  # 30,000 Wh
-    b_total_wh = BACKUP_BATTERY_DEGRADED_WH * BACKUP_DEGRADATION  # 21,000 * 0.7 = 14,700 Wh
-    
-    # Current energy stored
     curr_p_wh = (p_pct / 100) * p_total_wh
     curr_b_wh = (b_pct / 100) * b_total_wh
     
-    # Tiered availability calculation
-    # Tier 1: Primary from 100% down to 40% (18 kWh available)
-    primary_tier1_capacity = p_total_wh * 0.60  # 18,000 Wh
-    primary_tier1_threshold = p_total_wh * 0.40  # 12,000 Wh
+    primary_tier1_capacity = p_total_wh * 0.60
+    primary_tier1_threshold = p_total_wh * 0.40
     
     if curr_p_wh > primary_tier1_threshold:
         primary_tier1_available = curr_p_wh - primary_tier1_threshold
     else:
         primary_tier1_available = 0
     
-    # Tier 2: Backup battery 80% usable (16.8 kWh, down to 20% before generator kicks in)
-    backup_capacity = b_total_wh * 0.80  # 11,760 Wh usable
-    backup_threshold = b_total_wh * 0.20  # 2,940 Wh (generator trigger point)
+    backup_capacity = b_total_wh * 0.80
+    backup_threshold = b_total_wh * 0.20
     
     if curr_b_wh > backup_threshold:
         backup_available = curr_b_wh - backup_threshold
     else:
         backup_available = 0
     
-    # Tier 3: Emergency Primary from 40% down to 20% (6 kWh for backup inverter overload)
-    emergency_capacity = p_total_wh * 0.20  # 6,000 Wh
-    emergency_threshold = p_total_wh * 0.20  # 6,000 Wh
+    emergency_capacity = p_total_wh * 0.20
+    emergency_threshold = p_total_wh * 0.20
     
     if curr_p_wh <= primary_tier1_threshold and curr_p_wh > emergency_threshold:
         emergency_available = curr_p_wh - emergency_threshold
     else:
         emergency_available = 0
     
-    # Total system usable capacity
-    total_system_capacity = primary_tier1_capacity + backup_capacity + emergency_capacity  # 18 + 11.76 + 6 = 35.76 kWh
-    
-    # Current total available
+    total_system_capacity = primary_tier1_capacity + backup_capacity + emergency_capacity
     total_available = primary_tier1_available + backup_available + emergency_available
-    
-    # Overall percentage
     total_pct = (total_available / total_system_capacity * 100) if total_system_capacity > 0 else 0
     
     return {
         'chart_data': [
-            round(primary_tier1_available / 1000, 1),  # Primary Tier 1
-            round(backup_available / 1000, 1),          # Backup
-            round(emergency_available / 1000, 1)        # Reserve
+            round(primary_tier1_available / 1000, 1),
+            round(backup_available / 1000, 1),
+            round(emergency_available / 1000, 1)
         ],
-        'tier_labels': ['Primary (100-40%)', 'Backup (80-20%)', 'Reserve (40-20%)'],
+        'tier_labels': ['Primary', 'Backup', 'Reserve'],
         'total_pct': round(total_pct, 1),
         'total_kwh': round(total_available / 1000, 1),
         'primary_pct': p_pct,
-        'backup_voltage': round(b_volts, 1),  # Format to 1 decimal
+        'backup_voltage': round(b_volts, 1),
         'backup_pct': round(b_pct, 1)
     }
 
 def calculate_battery_cascade(solar, load, p_pct, b_volts, b_active=False):
     """
-    Simulates battery levels over forecast period using tiered discharge:
+    Simulates battery levels with tier tracking for color-coded display.
+    Returns percentage that matches dashboard display exactly.
     """
-    if not solar or not load: return {'labels': [], 'data': []}
+    if not solar or not load: return {'labels': [], 'data': [], 'tiers': []}
     
-    # System capacities
-    p_total_wh = PRIMARY_BATTERY_CAPACITY_WH  # 30,000 Wh
-    b_total_wh = BACKUP_BATTERY_DEGRADED_WH * BACKUP_DEGRADATION  # 14,700 Wh
+    p_total_wh = PRIMARY_BATTERY_CAPACITY_WH
+    b_total_wh = BACKUP_BATTERY_DEGRADED_WH * BACKUP_DEGRADATION
     
-    # Starting state
     curr_p_wh = (p_pct / 100.0) * p_total_wh
     b_pct = max(0, min(100, (b_volts - 51.0) / 2.0 * 100))
     curr_b_wh = (b_pct / 100.0) * b_total_wh
     
-    sim_data, sim_labels = [], []
+    sim_data, sim_labels, tier_info = [], [], []
     
     for i in range(min(len(solar), len(load))):
         net = solar[i]['estimated_generation'] - load[i]['estimated_load']
         
-        if net > 0:  # Charging
-            # Charge primary first up to 100%
+        if net > 0:
             space_in_primary = p_total_wh - curr_p_wh
             if net <= space_in_primary:
                 curr_p_wh += net
             else:
                 curr_p_wh = p_total_wh
-                # Overflow charges backup
                 overflow = net - space_in_primary
                 curr_b_wh = min(b_total_wh, curr_b_wh + overflow)
-        else:  # Discharging
+        else:
             drain = abs(net)
-            
-            # Tier 1: Use primary from current level down to 40%
-            primary_min = p_total_wh * 0.40  # 12,000 Wh
+            primary_min = p_total_wh * 0.40
             available_tier1 = max(0, curr_p_wh - primary_min)
             
             if available_tier1 >= drain:
@@ -436,9 +323,8 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts, b_active=False):
                 curr_p_wh = primary_min
                 drain -= available_tier1
             
-            # Tier 2: Use backup if drain remains
             if drain > 0:
-                backup_min = b_total_wh * 0.20  # 2,940 Wh (generator trigger)
+                backup_min = b_total_wh * 0.20
                 available_backup = max(0, curr_b_wh - backup_min)
                 
                 if available_backup >= drain:
@@ -448,9 +334,8 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts, b_active=False):
                     curr_b_wh = backup_min
                     drain -= available_backup
             
-            # Tier 3: Emergency primary (40% → 20%)
             if drain > 0:
-                emergency_min = p_total_wh * 0.20  # 6,000 Wh
+                emergency_min = p_total_wh * 0.20
                 available_emergency = max(0, curr_p_wh - emergency_min)
                 
                 if available_emergency >= drain:
@@ -458,7 +343,7 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts, b_active=False):
                 else:
                     curr_p_wh = emergency_min
         
-        # Calculate total available across all tiers
+        # Match dashboard display calculation
         primary_tier1_avail = max(0, curr_p_wh - (p_total_wh * 0.40))
         backup_avail = max(0, curr_b_wh - (b_total_wh * 0.20))
         emergency_avail = max(0, min(curr_p_wh, p_total_wh * 0.40) - (p_total_wh * 0.20))
@@ -467,10 +352,22 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts, b_active=False):
         total_available = primary_tier1_avail + backup_avail + emergency_avail
         
         percentage = (total_available / total_capacity) * 100 if total_capacity > 0 else 0
+        
+        # Determine active tier for color
+        if primary_tier1_avail > 0:
+            active_tier = 'primary'
+        elif backup_avail > 0:
+            active_tier = 'backup'
+        elif emergency_avail > 0:
+            active_tier = 'reserve'
+        else:
+            active_tier = 'empty'
+        
         sim_data.append(percentage)
         sim_labels.append(solar[i]['time'].strftime('%H:%M'))
+        tier_info.append(active_tier)
     
-    return {'labels': sim_labels, 'data': sim_data}
+    return {'labels': sim_labels, 'data': sim_data, 'tiers': tier_info}
 
 # ----------------------------
 # 3. Helpers
@@ -483,8 +380,8 @@ latest_data = {
     "primary_battery_min": 0, "backup_battery_voltage": 0, "backup_active": False,
     "generator_running": False, "inverters": [], "detected_appliances": [], 
     "solar_forecast": [], "load_forecast": [], 
-    "battery_sim": {"labels": [], "data": []},
-    "energy_breakdown": {"chart_data": [1, 0, 1], "total_pct": 0, "total_kwh": 0, "primary_pct": 0, "backup_voltage": 0, "backup_pct": 0},
+    "battery_sim": {"labels": [], "data": [], "tiers": []},
+    "energy_breakdown": {"chart_data": [1, 0, 1], "total_pct": 0, "total_kwh": 0},
     "scheduler": [],
     "heatmap_data": [],
     "hourly_24h": []
@@ -554,7 +451,7 @@ def poll_growatt():
                         try:
                             json_resp = r.json()
                         except ValueError:
-                            continue # Skip if API returns non-JSON (HTML 502/503)
+                            continue
 
                         if json_resp.get("error_code") == 0:
                             d = json_resp.get("data", {})
@@ -579,27 +476,22 @@ def poll_growatt():
                                 if float(d.get("vac") or 0) > 100 or float(d.get("pAcInPut") or 0) > 50: gen_on = True
                 except: pass
 
-            # FIX: Use safety check on min() to prevent crash on empty list
             p_min = min(p_caps) if p_caps else 0
             b_volts = b_data['vBat'] if b_data else 0
             b_act = b_data['OutputPower'] > 50 if b_data else False
             
-            # Daily accumulation
             current_date = now.strftime('%Y-%m-%d')
             if daily_accumulator['last_date'] != current_date:
-                # New day - save yesterday's data
                 if daily_accumulator['last_date']:
                     history_manager.update_daily(
                         daily_accumulator['last_date'],
                         daily_accumulator['consumption_wh'],
                         daily_accumulator['solar_wh'],
-                        TOTAL_SOLAR_CAPACITY_KW * 1000 * 10  # ~10 hours avg potential
+                        TOTAL_SOLAR_CAPACITY_KW * 1000 * 10
                     )
                     history_manager.save_history()
-                # Reset for new day
                 daily_accumulator = {'consumption_wh': 0, 'solar_wh': 0, 'last_date': current_date}
             
-            # Accumulate (Wh = W * hours, so W * (minutes/60))
             interval_hours = POLL_INTERVAL_MINUTES / 60.0
             daily_accumulator['consumption_wh'] += tot_out * interval_hours
             daily_accumulator['solar_wh'] += tot_sol * interval_hours
@@ -608,7 +500,6 @@ def poll_growatt():
             is_manual_gen = any("Water" in x for x in detected)
             if not is_manual_gen: load_manager.update(tot_out)
             
-            # Add granular datapoint for 24h chart
             history_manager.add_hourly_datapoint(now, tot_out, tot_bat, tot_sol)
             
             if gen_on: send_email("Generator ON", "Generator running", "gen")
@@ -623,7 +514,6 @@ def poll_growatt():
             sim_res = calculate_battery_cascade(s_cast, l_cast, p_min, b_volts, b_act)
             breakdown = calculate_battery_breakdown(p_min, b_volts)
             
-            # FIX: Pass keyword arguments correctly to scheduler to match function definition
             schedule = generate_smart_schedule(
                 battery_soc_pct=p_min, 
                 battery_kwh_available=breakdown['total_kwh'],
@@ -668,14 +558,13 @@ def poll_growatt():
 # ----------------------------
 @app.route('/health')
 def health(): 
-    # FIX: Include polling status so frontend auto-starts
     return jsonify({"status": "healthy", "polling_thread_alive": polling_active})
 
 @app.route('/start-polling')
 def start_polling():
     global polling_active, polling_thread
     if not polling_active:
-        polling_active = True # Set flag immediately
+        polling_active = True
         polling_thread = Thread(target=poll_growatt, daemon=True)
         polling_thread.start()
     return jsonify({"status": "started"})
@@ -698,14 +587,14 @@ def home():
     
     breakdown = d.get("energy_breakdown") or {
         "chart_data": [1,0,1], 
-        "tier_labels": ['Primary (100-40%)', 'Backup (80-20%)', 'Reserve (40-20%)'],
+        "tier_labels": ['Primary', 'Backup', 'Reserve'],
         "total_pct": 0, 
         "total_kwh": 0,
         "primary_pct": 0,
         "backup_voltage": 0,
         "backup_pct": 0
     }
-    sim = d.get("battery_sim") or {"labels": [], "data": []}
+    sim = d.get("battery_sim") or {"labels": [], "data": [], "tiers": []}
     s_fc = d.get("solar_forecast") or []
     l_fc = d.get("load_forecast") or []
     schedule = d.get("scheduler") or []
@@ -724,7 +613,7 @@ def home():
     c_load = [x['estimated_load'] for x in l_fc] if l_fc else []
     c_solar = [x['estimated_generation'] for x in s_fc[:len(l_fc)]] if s_fc else []
     alerts = alert_history[:8]
-    tier_labels = breakdown.get('tier_labels', ['Primary (100-40%)', 'Backup (80-20%)', 'Reserve (40-20%)'])
+    tier_labels = breakdown.get('tier_labels', ['Primary', 'Backup', 'Reserve'])
     primary_pct = breakdown.get('primary_pct', 0)
     backup_voltage = breakdown.get('backup_voltage', 0)
     backup_pct = breakdown.get('backup_pct', 0)
@@ -746,9 +635,7 @@ def home():
             --text: #e2e8f0; --text-muted: #94a3b8; --text-dim: #64748b;
             --success: #10b981; --warn: #f59e0b; --crit: #ef4444; --info: #3b82f6;
             --accent: #6366f1; --accent-glow: rgba(99, 102, 241, 0.3);
-            --gradient-1: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            --gradient-2: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-            --gradient-solar: linear-gradient(135deg, #ffd89b 0%, #19547b 100%);
+            --primary-color: #10b981; --backup-color: #3b82f6; --reserve-color: #f59e0b;
         }
         
         * { box-sizing: border-box; }
@@ -851,7 +738,7 @@ def home():
             left: 0;
             right: 0;
             height: 3px;
-            background: var(--gradient-1);
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             opacity: 0;
             transition: opacity 0.3s;
         }
@@ -1158,25 +1045,6 @@ def home():
         canvas {
             filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.2));
         }
-        
-        /* Tooltip */
-        .tooltip {
-            position: absolute;
-            background: rgba(15, 23, 42, 0.95);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 8px 12px;
-            font-size: 0.75rem;
-            pointer-events: none;
-            opacity: 0;
-            transition: opacity 0.2s;
-            z-index: 100;
-            backdrop-filter: blur(10px);
-        }
-        
-        .heatmap-cell:hover .tooltip {
-            opacity: 1;
-        }
     </style>
 </head>
 <body>
@@ -1282,7 +1150,7 @@ def home():
                     <div class="sched-tile" onclick="toggleSim('{{ s.id }}', {{ s.watts }})" id="btn-{{ s.id }}">
                         <div class="tile-icon">{{ s.icon }}</div>
                         <div class="tile-name">{{ s.name }}</div>
-                        <div class="tile-status" style="color: {{ s.color }}">{{ s.msg }}</div>
+                        <div class="tile-status" style="color: {{ s.color }}">{{ s.decision }}</div>
                     </div>
                     {% endfor %}
                 </div>
@@ -1293,7 +1161,7 @@ def home():
 
             <!-- BATTERY PROJECTION -->
             <div class="col-8 card">
-                <div class="card-title">24-Hour Battery Projection</div>
+                <div class="card-title">24-Hour Battery Projection (Tier-Aware)</div>
                 <div style="height:280px"><canvas id="simChart"></canvas></div>
             </div>
 
@@ -1302,10 +1170,10 @@ def home():
                 <div class="card-title">Storage Breakdown</div>
                 <div style="height:200px"><canvas id="pieChart"></canvas></div>
                 <div style="text-align:center; margin-top:15px; font-size:1.1rem; color: var(--success); font-weight: 700">
-                    {{ breakdown['total_pct'] }}% Charged
+                    {{ breakdown['total_pct'] }}% Available
                 </div>
                 <div style="text-align:center; color: var(--text-muted); font-size:0.85rem">
-                    {{ breakdown['total_kwh'] }} kWh Available
+                    {{ breakdown['total_kwh'] }} kWh Usable
                 </div>
                 <div style="margin-top:10px; padding-top:10px; border-top: 1px solid var(--border); font-size:0.75rem; color: var(--text-dim)">
                     <div>Primary: {{ primary_pct }}%</div>
@@ -1355,6 +1223,7 @@ def home():
         // Data from Backend
         const labels = {{ sim['labels']|tojson }};
         const baseData = {{ sim['data']|tojson }};
+        const tierData = {{ sim['tiers']|tojson }};
         const sForecast = {{ s_fc|tojson }};
         const lForecast = {{ l_fc|tojson }};
         const pieData = {{ breakdown['chart_data']|tojson }};
@@ -1369,18 +1238,42 @@ def home():
         Chart.defaults.borderColor = 'rgba(99, 102, 241, 0.2)';
         Chart.defaults.font.family = "'Manrope', sans-serif";
         
-        // --- 1. Simulation Chart ---
+        // --- 1. Tier-Aware Battery Projection Chart ---
         const ctx = document.getElementById('simChart');
+        
+        // Create color array based on tier
+        const borderColors = tierData.map(tier => {
+            if (tier === 'primary') return '#10b981';  // Green
+            if (tier === 'backup') return '#3b82f6';   // Blue
+            if (tier === 'reserve') return '#f59e0b';  // Orange
+            return '#64748b';  // Grey for empty
+        });
+        
+        const backgroundColors = tierData.map(tier => {
+            if (tier === 'primary') return 'rgba(16, 185, 129, 0.1)';
+            if (tier === 'backup') return 'rgba(59, 130, 246, 0.1)';
+            if (tier === 'reserve') return 'rgba(245, 158, 11, 0.1)';
+            return 'rgba(100, 116, 139, 0.1)';
+        });
+        
         const chart = new Chart(ctx, {
             type: 'line',
             data: {
                 labels: labels,
                 datasets: [
                     {
-                        label: 'Current Projection',
+                        label: 'Battery Level',
                         data: baseData,
-                        borderColor: '#10b981',
-                        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                        segment: {
+                            borderColor: ctx => {
+                                const idx = ctx.p0DataIndex;
+                                return borderColors[idx] || '#10b981';
+                            },
+                            backgroundColor: ctx => {
+                                const idx = ctx.p0DataIndex;
+                                return backgroundColors[idx] || 'rgba(16, 185, 129, 0.1)';
+                            }
+                        },
                         borderWidth: 3,
                         tension: 0.4,
                         pointRadius: 0,
@@ -1409,7 +1302,8 @@ def home():
                         labels: {
                             usePointStyle: true,
                             padding: 15,
-                            font: { size: 12, weight: '600' }
+                            font: { size: 12, weight: '600' },
+                            filter: (item, chart) => item.text !== 'Battery Level' // Hide default legend
                         }
                     },
                     tooltip: {
@@ -1422,7 +1316,9 @@ def home():
                         displayColors: true,
                         callbacks: {
                             label: function(context) {
-                                return context.dataset.label + ': ' + context.parsed.y.toFixed(1) + '%';
+                                const tier = tierData[context.dataIndex] || 'unknown';
+                                const tierName = tier.charAt(0).toUpperCase() + tier.slice(1);
+                                return tierName + ': ' + context.parsed.y.toFixed(1) + '%';
                             }
                         }
                     }
@@ -1449,7 +1345,7 @@ def home():
             }
         });
 
-        // --- 2. Storage Pie Chart (3 Tiers) ---
+        // --- 2. Storage Pie Chart (No Percentages) ---
         new Chart(document.getElementById('pieChart'), {
             type: 'doughnut',
             data: {
