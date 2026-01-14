@@ -249,7 +249,7 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
     battery_soc_pct = status['total_pct']  # Use total system availability
     
     # Get primary battery percentage from status
-    primary_pct = status.get('curr_p_wh', 0) / PRIMARY_BATTERY_CAPACITY_WH * 100
+    primary_pct = status.get('primary_battery_pct', 0)
 
     current_solar_kw = solar_forecast_kw
     if isinstance(solar_forecast_kw, list) and len(solar_forecast_kw) > 0:
@@ -348,7 +348,7 @@ def calculate_battery_breakdown(p_pct, b_volts):
         'primary_pct': p_pct,
         'backup_voltage': round(b_volts, 1),
         'backup_pct': round(status['b_pct'], 1),
-        'status_obj': status # For internal use
+        'status_obj': {**status, 'primary_battery_pct': p_pct}  # Add primary_pct to status
     }
 
 def calculate_battery_cascade(solar, load, p_pct, b_volts):
