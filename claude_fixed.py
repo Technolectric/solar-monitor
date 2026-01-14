@@ -90,6 +90,7 @@ class DailyHistoryManager:
     def __init__(self, filename):
         self.filename = filename
         self.history = self.load_history()
+        self.hourly_data = []  # Store last 24 hours of granular data
         
     def load_history(self):
         if Path(self.filename).exists():
@@ -104,6 +105,22 @@ class DailyHistoryManager:
             with open(self.filename, 'w') as f:
                 json.dump(self.history, f)
         except: pass
+    
+    def add_hourly_datapoint(self, timestamp, load_w, battery_discharge_w, solar_w):
+        """Add a datapoint for 24-hour detailed chart"""
+        self.hourly_data.append({
+            'timestamp': timestamp.isoformat(),
+            'load': load_w,
+            'battery_discharge': battery_discharge_w,
+            'solar': solar_w
+        })
+        # Keep only last 24 hours (at 5min intervals = 288 points)
+        if len(self.hourly_data) > 288:
+            self.hourly_data = self.hourly_data[-288:]
+    
+    def get_last_24h_data(self):
+        """Return last 24 hours of granular data"""
+        return self.hourly_data
     
     def update_daily(self, date_str, total_consumption_wh, total_solar_wh, max_solar_potential_wh):
         """Update daily totals"""
@@ -190,58 +207,162 @@ def generate_smart_schedule(p_pct, s_forecast, l_forecast):
     return advice
 
 def calculate_battery_breakdown(p_pct, b_volts):
-    """Calculates breakdown for circular chart (Usable + Empty)."""
+    """
+    Calculates breakdown for circular chart with tiered discharge strategy:
+    1. Primary Battery: 100% → 40% (18 kWh usable)
+    2. Backup Battery: 53.0V → 51.2V (16.8 kWh usable, 80% of degraded capacity)
+    3. Emergency Primary: 40% → 20% (6 kWh emergency reserve)
+    
+    Voltage formula for backup: 51.0V = 0%, 53.0V = 100%
+    So: battery_pct = (voltage - 51.0) / 2.0 * 100
+    """
+    # Backup battery percentage from voltage
     b_pct = max(0, min(100, (b_volts - 51.0) / 2.0 * 100))
-    p_cap = PRIMARY_BATTERY_CAPACITY_WH
-    b_cap = BACKUP_BATTERY_DEGRADED_WH * BACKUP_DEGRADATION
     
-    curr_p = (p_pct / 100) * p_cap
-    curr_b = (b_pct / 100) * b_cap
+    # Total capacities
+    p_total_wh = PRIMARY_BATTERY_CAPACITY_WH  # 30,000 Wh
+    b_total_wh = BACKUP_BATTERY_DEGRADED_WH * BACKUP_DEGRADATION  # 21,000 * 0.7 = 14,700 Wh
     
-    p_avail = max(0, curr_p - (p_cap * 0.40))
-    b_avail = max(0, curr_b - (b_cap * 0.20))
+    # Current energy stored
+    curr_p_wh = (p_pct / 100) * p_total_wh
+    curr_b_wh = (b_pct / 100) * b_total_wh
     
-    total_usable_cap = (p_cap * 0.60) + (b_cap * 0.80)
-    current_usable_total = p_avail + b_avail
-    empty_space = max(0, total_usable_cap - current_usable_total)
+    # Tiered availability calculation
+    # Tier 1: Primary from 100% down to 40% (18 kWh available)
+    primary_tier1_capacity = p_total_wh * 0.60  # 18,000 Wh
+    primary_tier1_threshold = p_total_wh * 0.40  # 12,000 Wh
     
-    total_pct = (current_usable_total / total_usable_cap * 100) if total_usable_cap > 0 else 0
+    if curr_p_wh > primary_tier1_threshold:
+        primary_tier1_available = curr_p_wh - primary_tier1_threshold
+    else:
+        primary_tier1_available = 0
+    
+    # Tier 2: Backup battery 80% usable (16.8 kWh, down to 20% before generator kicks in)
+    backup_capacity = b_total_wh * 0.80  # 11,760 Wh usable
+    backup_threshold = b_total_wh * 0.20  # 2,940 Wh (generator trigger point)
+    
+    if curr_b_wh > backup_threshold:
+        backup_available = curr_b_wh - backup_threshold
+    else:
+        backup_available = 0
+    
+    # Tier 3: Emergency Primary from 40% down to 20% (6 kWh for backup inverter overload)
+    emergency_capacity = p_total_wh * 0.20  # 6,000 Wh
+    emergency_threshold = p_total_wh * 0.20  # 6,000 Wh
+    
+    if curr_p_wh <= primary_tier1_threshold and curr_p_wh > emergency_threshold:
+        emergency_available = curr_p_wh - emergency_threshold
+    else:
+        emergency_available = 0
+    
+    # Total system usable capacity
+    total_system_capacity = primary_tier1_capacity + backup_capacity + emergency_capacity  # 18 + 11.76 + 6 = 35.76 kWh
+    
+    # Current total available
+    total_available = primary_tier1_available + backup_available + emergency_available
+    
+    # Empty space
+    empty_space = max(0, total_system_capacity - total_available)
+    
+    # Overall percentage
+    total_pct = (total_available / total_system_capacity * 100) if total_system_capacity > 0 else 0
     
     return {
-        'chart_data': [round(p_avail/1000, 1), round(b_avail/1000, 1), round(empty_space/1000, 1)],
+        'chart_data': [
+            round(primary_tier1_available / 1000, 1),  # Primary Tier 1
+            round(backup_available / 1000, 1),          # Backup
+            round(emergency_available / 1000, 1),       # Emergency Primary
+            round(empty_space / 1000, 1)                # Empty
+        ],
+        'tier_labels': ['Primary (100-40%)', 'Backup (80-20%)', 'Emergency (40-20%)', 'Empty'],
         'total_pct': round(total_pct, 1),
-        'total_kwh': round(current_usable_total/1000, 1)
+        'total_kwh': round(total_available / 1000, 1),
+        'primary_pct': p_pct,
+        'backup_voltage': b_volts,
+        'backup_pct': round(b_pct, 1)
     }
 
-def calculate_battery_cascade(solar, load, p_pct, b_active=False):
+def calculate_battery_cascade(solar, load, p_pct, b_volts, b_active=False):
+    """
+    Simulates battery levels over forecast period using tiered discharge:
+    1. Primary 100% → 40% (18 kWh)
+    2. Backup 80% → 20% (based on voltage)
+    3. Emergency Primary 40% → 20% (6 kWh)
+    """
     if not solar or not load: return {'labels': [], 'data': []}
-    p_wh = PRIMARY_BATTERY_CAPACITY_WH
-    b_wh = BACKUP_BATTERY_DEGRADED_WH * BACKUP_DEGRADATION
-    total_sys_wh = p_wh + b_wh
     
-    curr_p = (p_pct / 100.0) * p_wh
-    curr_b = (100 if b_active else 0) / 100.0 * b_wh 
+    # System capacities
+    p_total_wh = PRIMARY_BATTERY_CAPACITY_WH  # 30,000 Wh
+    b_total_wh = BACKUP_BATTERY_DEGRADED_WH * BACKUP_DEGRADATION  # 14,700 Wh
+    
+    # Starting state
+    curr_p_wh = (p_pct / 100.0) * p_total_wh
+    b_pct = max(0, min(100, (b_volts - 51.0) / 2.0 * 100))
+    curr_b_wh = (b_pct / 100.0) * b_total_wh
     
     sim_data, sim_labels = [], []
-    run_p, run_b = curr_p, curr_b
     
     for i in range(min(len(solar), len(load))):
         net = solar[i]['estimated_generation'] - load[i]['estimated_load']
-        if net > 0:
-            space_p = p_wh - run_p
-            if net <= space_p: run_p += net
+        
+        if net > 0:  # Charging
+            # Charge primary first up to 100%
+            space_in_primary = p_total_wh - curr_p_wh
+            if net <= space_in_primary:
+                curr_p_wh += net
             else:
-                run_p = p_wh
-                run_b = min(b_wh, run_b + (net - space_p))
-        else:
+                curr_p_wh = p_total_wh
+                # Overflow charges backup
+                overflow = net - space_in_primary
+                curr_b_wh = min(b_total_wh, curr_b_wh + overflow)
+        else:  # Discharging
             drain = abs(net)
-            avail_p = max(0, run_p - (p_wh * 0.40))
-            if avail_p >= drain: run_p -= drain
+            
+            # Tier 1: Use primary from current level down to 40%
+            primary_min = p_total_wh * 0.40  # 12,000 Wh
+            available_tier1 = max(0, curr_p_wh - primary_min)
+            
+            if available_tier1 >= drain:
+                curr_p_wh -= drain
+                drain = 0
             else:
-                run_p = max(run_p - avail_p, p_wh * 0.40)
-                run_b = max(0, run_b - (drain - avail_p))
-        sim_data.append(((run_p + run_b) / total_sys_wh) * 100)
+                curr_p_wh = primary_min
+                drain -= available_tier1
+            
+            # Tier 2: Use backup if drain remains
+            if drain > 0:
+                backup_min = b_total_wh * 0.20  # 2,940 Wh (generator trigger)
+                available_backup = max(0, curr_b_wh - backup_min)
+                
+                if available_backup >= drain:
+                    curr_b_wh -= drain
+                    drain = 0
+                else:
+                    curr_b_wh = backup_min
+                    drain -= available_backup
+            
+            # Tier 3: Emergency primary (40% → 20%)
+            if drain > 0:
+                emergency_min = p_total_wh * 0.20  # 6,000 Wh
+                available_emergency = max(0, curr_p_wh - emergency_min)
+                
+                if available_emergency >= drain:
+                    curr_p_wh -= drain
+                else:
+                    curr_p_wh = emergency_min
+        
+        # Calculate total available across all tiers
+        primary_tier1_avail = max(0, curr_p_wh - (p_total_wh * 0.40))
+        backup_avail = max(0, curr_b_wh - (b_total_wh * 0.20))
+        emergency_avail = max(0, min(curr_p_wh, p_total_wh * 0.40) - (p_total_wh * 0.20))
+        
+        total_capacity = (p_total_wh * 0.60) + (b_total_wh * 0.80) + (p_total_wh * 0.20)
+        total_available = primary_tier1_avail + backup_avail + emergency_avail
+        
+        percentage = (total_available / total_capacity) * 100 if total_capacity > 0 else 0
+        sim_data.append(percentage)
         sim_labels.append(solar[i]['time'].strftime('%H:%M'))
+    
     return {'labels': sim_labels, 'data': sim_data}
 
 # ----------------------------
@@ -256,9 +377,10 @@ latest_data = {
     "generator_running": False, "inverters": [], "detected_appliances": [], 
     "solar_forecast": [], "load_forecast": [], 
     "battery_sim": {"labels": [], "data": []},
-    "energy_breakdown": {"chart_data": [1, 0, 1], "total_pct": 0, "total_kwh": 0},
+    "energy_breakdown": {"chart_data": [1, 0, 1, 1], "total_pct": 0, "total_kwh": 0},
     "scheduler": [],
-    "heatmap_data": []
+    "heatmap_data": [],
+    "hourly_24h": []
 }
 
 def get_weather_forecast():
@@ -372,6 +494,9 @@ def poll_growatt():
             is_manual_gen = any("Water" in x for x in detected)
             if not is_manual_gen: load_manager.update(tot_out)
             
+            # Add granular datapoint for 24h chart
+            history_manager.add_hourly_datapoint(now, tot_out, tot_bat, tot_sol)
+            
             if gen_on: send_email("Generator ON", "Generator running", "gen")
             if p_min < 30: send_email("Battery Critical", f"Primary at {p_min}%", "crit")
             
@@ -381,10 +506,11 @@ def poll_growatt():
 
             l_cast = load_manager.get_forecast(24)
             s_cast = generate_solar_forecast(wx_data)
-            sim_res = calculate_battery_cascade(s_cast, l_cast, p_min, b_act)
+            sim_res = calculate_battery_cascade(s_cast, l_cast, p_min, b_volts, b_act)
             breakdown = calculate_battery_breakdown(p_min, b_volts)
             schedule = generate_smart_schedule(p_min, s_cast, l_cast)
             heatmap = history_manager.get_last_30_days()
+            hourly_24h = history_manager.get_last_24h_data()
             
             prev_watts = tot_out
             latest_data = {
@@ -403,7 +529,8 @@ def poll_growatt():
                 "energy_breakdown": breakdown,
                 "scheduler": schedule,
                 "inverters": inv_data,
-                "heatmap_data": heatmap
+                "heatmap_data": heatmap,
+                "hourly_24h": hourly_24h
             }
             print(f"Update: Load={tot_out}W")
             
@@ -449,6 +576,7 @@ def home():
     l_fc = d.get("load_forecast") or []
     schedule = d.get("scheduler") or []
     heatmap = d.get("heatmap_data") or []
+    hourly_24h = d.get("hourly_24h") or []
     
     st_txt, st_col = "NORMAL", "var(--info)"
     if gen_on: st_txt, st_col = "GENERATOR ON", "var(--crit)"
@@ -472,6 +600,7 @@ def home():
     <title>Solar Monitor Pro</title>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Manrope:wght@400;600;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <style>
         :root { 
             --bg: #0a0e27; --bg-secondary: #151b3d; --card: rgba(21, 27, 61, 0.7); 
@@ -1040,6 +1169,19 @@ def home():
                 <div style="text-align:center; color: var(--text-muted); font-size:0.85rem">
                     {{ breakdown['total_kwh'] }} kWh Available
                 </div>
+                <div style="margin-top:10px; padding-top:10px; border-top: 1px solid var(--border); font-size:0.75rem; color: var(--text-dim)">
+                    <div>Primary: {{ breakdown['primary_pct'] }}%</div>
+                    <div>Backup: {{ breakdown['backup_voltage'] }}V ({{ breakdown['backup_pct'] }}%)</div>
+                </div>
+            </div>
+
+            <!-- 24-HOUR LOAD VS DISCHARGE -->
+            <div class="col-12 card">
+                <div class="card-title">Last 24 Hours: Load vs Battery Discharge vs Solar</div>
+                <div style="height:300px"><canvas id="hourlyChart"></canvas></div>
+                <div style="margin-top:10px; text-align:right; font-size:0.75rem; color: var(--text-muted)">
+                    Use mouse wheel or pinch to zoom | Drag to pan | Double-click to reset
+                </div>
             </div>
 
             <!-- ACTIVITY & ALERTS -->
@@ -1078,6 +1220,8 @@ def home():
         const sForecast = {{ s_fc|tojson }};
         const lForecast = {{ l_fc|tojson }};
         const pieData = {{ breakdown['chart_data']|tojson }};
+        const tierLabels = {{ breakdown['tier_labels']|tojson }};
+        const hourly24h = {{ hourly_24h|tojson }};
         
         // Sim State
         let activeSims = {};
@@ -1167,17 +1311,18 @@ def home():
             }
         });
 
-        // --- 2. Storage Pie Chart ---
+        // --- 2. Storage Pie Chart (4 Tiers) ---
         new Chart(document.getElementById('pieChart'), {
             type: 'doughnut',
             data: {
-                labels: ['Primary Battery', 'Backup Battery', 'Empty Capacity'],
+                labels: tierLabels,
                 datasets: [{
                     data: pieData,
                     backgroundColor: [
-                        'rgba(16, 185, 129, 0.8)',
-                        'rgba(245, 158, 11, 0.8)',
-                        'rgba(100, 116, 139, 0.3)'
+                        'rgba(16, 185, 129, 0.9)',   // Primary Tier 1 (green)
+                        'rgba(59, 130, 246, 0.8)',    // Backup (blue)
+                        'rgba(245, 158, 11, 0.8)',    // Emergency (orange)
+                        'rgba(100, 116, 139, 0.3)'    // Empty (grey)
                     ],
                     borderWidth: 0,
                     borderRadius: 4,
@@ -1187,14 +1332,14 @@ def home():
             options: { 
                 responsive: true, 
                 maintainAspectRatio: false, 
-                cutout: '75%', 
+                cutout: '70%', 
                 plugins: { 
                     legend: { 
                         position: 'bottom',
                         labels: {
-                            padding: 15,
+                            padding: 12,
                             usePointStyle: true,
-                            font: { size: 11, weight: '600' }
+                            font: { size: 10, weight: '600' }
                         }
                     },
                     tooltip: {
@@ -1214,7 +1359,128 @@ def home():
             }
         });
 
-        // --- 3. Interaction Logic ---
+        // --- 3. 24-Hour Load vs Discharge Chart with Zoom ---
+        const hourlyLabels = hourly24h.map(d => {
+            const dt = new Date(d.timestamp);
+            return dt.toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit'});
+        });
+        const loadData = hourly24h.map(d => d.load);
+        const dischargeData = hourly24h.map(d => d.battery_discharge);
+        const solarData = hourly24h.map(d => d.solar);
+
+        const hourlyCtx = document.getElementById('hourlyChart');
+        const hourlyChart = new Chart(hourlyCtx, {
+            type: 'line',
+            data: {
+                labels: hourlyLabels,
+                datasets: [
+                    {
+                        label: 'Load (W)',
+                        data: loadData,
+                        borderColor: '#ef4444',
+                        backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.3,
+                        fill: true,
+                        pointRadius: 1,
+                        pointHoverRadius: 5
+                    },
+                    {
+                        label: 'Battery Discharge (W)',
+                        data: dischargeData,
+                        borderColor: '#f59e0b',
+                        backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.3,
+                        fill: true,
+                        pointRadius: 1,
+                        pointHoverRadius: 5
+                    },
+                    {
+                        label: 'Solar (W)',
+                        data: solarData,
+                        borderColor: '#10b981',
+                        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.3,
+                        fill: true,
+                        pointRadius: 1,
+                        pointHoverRadius: 5
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { intersect: false, mode: 'index' },
+                plugins: {
+                    legend: {
+                        labels: {
+                            usePointStyle: true,
+                            padding: 15,
+                            font: { size: 12, weight: '600' }
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                        titleColor: '#e2e8f0',
+                        bodyColor: '#94a3b8',
+                        borderColor: 'rgba(99, 102, 241, 0.3)',
+                        borderWidth: 1,
+                        padding: 12,
+                        callbacks: {
+                            label: function(context) {
+                                return context.dataset.label + ': ' + context.parsed.y.toFixed(0) + 'W';
+                            }
+                        }
+                    },
+                    zoom: {
+                        zoom: {
+                            wheel: {
+                                enabled: true,
+                                speed: 0.1
+                            },
+                            pinch: {
+                                enabled: true
+                            },
+                            mode: 'x',
+                        },
+                        pan: {
+                            enabled: true,
+                            mode: 'x',
+                        },
+                        limits: {
+                            x: {min: 'original', max: 'original'}
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        grid: { color: 'rgba(99, 102, 241, 0.1)' },
+                        ticks: {
+                            callback: function(value) {
+                                return value + 'W';
+                            }
+                        }
+                    },
+                    x: {
+                        grid: { display: false },
+                        ticks: {
+                            maxRotation: 45,
+                            minRotation: 45,
+                            maxTicksLimit: 20
+                        }
+                    }
+                }
+            }
+        });
+
+        // Double-click to reset zoom
+        hourlyCtx.ondblclick = function() {
+            hourlyChart.resetZoom();
+        };
+
+        // --- 4. Interaction Logic ---
         function toggleSim(id, watts) {
             const btn = document.getElementById('btn-' + id);
             
@@ -1238,10 +1504,13 @@ def home():
                 return;
             }
 
-            // Simplified JS Physics
-            const BAT_WH = 30000 + (21000 * 0.7); 
+            // Simplified JS Physics matching Python tiered logic
+            const P_TOTAL = 30000;
+            const B_TOTAL = 21000 * 0.7;
+            const TOTAL_CAPACITY = (P_TOTAL * 0.60) + (B_TOTAL * 0.80) + (P_TOTAL * 0.20);
+            
             let currentPct = baseData[0] || 0;
-            let currentWh = (currentPct / 100) * BAT_WH;
+            let currentWh = (currentPct / 100) * TOTAL_CAPACITY;
             let simCurve = [];
             
             for(let i = 0; i < labels.length; i++) {
@@ -1250,12 +1519,12 @@ def home():
                 let net = sol - (baseL + totalSimWatts);
                 
                 if(net > 0) {
-                    currentWh = Math.min(BAT_WH, currentWh + net);
+                    currentWh = Math.min(TOTAL_CAPACITY, currentWh + net);
                 } else {
                     currentWh = Math.max(0, currentWh - Math.abs(net));
                 }
                 
-                simCurve.push((currentWh / BAT_WH) * 100);
+                simCurve.push((currentWh / TOTAL_CAPACITY) * 100);
             }
             
             chart.data.datasets[1].data = simCurve;
@@ -1278,7 +1547,7 @@ def home():
         gen_on=gen_on, detected=detected, st_txt=st_txt, st_col=st_col,
         is_charging=is_charging, is_discharging=is_discharging,
         s_fc=s_fc, l_fc=l_fc, sim=sim, breakdown=breakdown, schedule=schedule,
-        heatmap=heatmap, alerts=alerts
+        heatmap=heatmap, alerts=alerts, hourly_24h=hourly_24h
     )
 
 if __name__ == '__main__':
