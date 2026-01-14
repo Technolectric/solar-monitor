@@ -787,6 +787,119 @@ def home():
     primary_pct = breakdown.get('primary_pct', 0)
     backup_voltage = breakdown.get('backup_voltage', 0)
     backup_pct = breakdown.get('backup_pct', 0)
+    
+    # Calculate surplus and weather conditions
+    surplus_power = solar - load
+    b_active = d.get("backup_active", False)
+    
+    # Build schedule items first (determines what's safe)
+    schedule_items = []
+    heavy_loads_safe = False  # Track if schedule allows heavy loads
+    
+    if s_fc:
+        best_start, best_end, current_run = None, None, 0
+        temp_start = None
+        for forecast_item in s_fc:
+            gen = forecast_item['estimated_generation']
+            if gen > 2000:
+                if current_run == 0: 
+                    temp_start = forecast_item['time']
+                current_run += 1
+            else:
+                if current_run > 0:
+                    if best_start is None or current_run > ((best_end.hour if best_end else 0) - (best_start.hour if best_start else 0)):
+                        best_start = temp_start
+                        best_end = forecast_item['time']
+                    current_run = 0
+        
+        if best_start and best_end:
+            schedule_items.append({
+                'icon': '🚿',
+                'title': 'Best Time for Heavy Loads',
+                'time': f"{best_start.strftime('%I:%M %p').lstrip('0')} - {best_end.strftime('%I:%M %p').lstrip('0')}",
+                'class': 'good'
+            })
+            # Check if we're currently in the good window
+            now = datetime.now(EAT)
+            if best_start <= now <= best_end:
+                heavy_loads_safe = True
+        else:
+            schedule_items.append({
+                'icon': '☁️',
+                'title': 'No High Solar Window',
+                'time': 'Avoid heavy loads today',
+                'class': 'warning'
+            })
+        
+        # Cloud warnings
+        next_3_gen = sum([forecast_item['estimated_generation'] for forecast_item in s_fc[:3]]) / 3 if len(s_fc) >= 3 else 0
+        current_hour = datetime.now(EAT).hour
+        if next_3_gen < 500 and 8 <= current_hour <= 16:
+            schedule_items.append({
+                'icon': '☁️',
+                'title': 'Cloud Warning',
+                'time': 'Low solar next 3 hours',
+                'class': 'warning'
+            })
+    
+    # Build recommendations based on schedule and system state
+    recommendation_items = []
+    
+    # Check if schedule says avoid heavy loads
+    schedule_blocks_heavy = any('Avoid heavy loads' in item.get('time', '') or 'No High Solar' in item.get('title', '') for item in schedule_items)
+    
+    if gen_on:
+        recommendation_items.append({
+            'icon': '🚨',
+            'title': 'NO HEAVY LOADS',
+            'description': 'Generator running - turn off all non-essential appliances',
+            'class': 'critical'
+        })
+    elif b_active:
+        recommendation_items.append({
+            'icon': '⚠️',
+            'title': 'MINIMIZE LOADS',
+            'description': 'Backup battery active - essential loads only',
+            'class': 'warning'
+        })
+    elif p_pct > 75 and surplus_power > 3000 and not schedule_blocks_heavy:
+        # Only recommend heavy loads if primary >75%, good surplus, AND schedule allows
+        recommendation_items.append({
+            'icon': '✅',
+            'title': 'SAFE TO USE HEAVY LOADS',
+            'description': f'Primary battery: {p_pct:.0f}% (>75%) | Surplus: {surplus_power:.0f}W',
+            'class': 'good'
+        })
+        heavy_loads_safe = True
+    elif p_pct > 75 and heavy_loads_safe and not schedule_blocks_heavy:
+        # In good solar window per schedule but not huge surplus
+        recommendation_items.append({
+            'icon': '✅',
+            'title': 'MODERATE LOADS OK',
+            'description': f'In good solar window | Primary: {p_pct:.0f}%',
+            'class': 'good'
+        })
+    elif breakdown['total_pct'] < 50 and solar < load:
+        recommendation_items.append({
+            'icon': '⚠️',
+            'title': 'CONSERVE POWER',
+            'description': f'Battery low ({breakdown["total_pct"]:.0f}%) and not charging well',
+            'class': 'warning'
+        })
+    elif schedule_blocks_heavy or p_pct <= 75:
+        recommendation_items.append({
+            'icon': '⚠️',
+            'title': 'LIMIT HEAVY LOADS',
+            'description': f'Primary battery {p_pct:.0f}% (≤75%) - use moderate loads only',
+            'class': 'warning'
+        })
+    else:
+        recommendation_items.append({
+            'icon': 'ℹ️',
+            'title': 'MONITOR USAGE',
+            'description': 'Check schedule below for optimal times',
+            'class': 'normal'
+        })
 
     html = """
 <!DOCTYPE html>
@@ -1122,6 +1235,27 @@ def home():
             letter-spacing: 0.5px;
         }
         
+        /* Recommendations */
+        .rec-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 1rem;
+            padding: 1rem;
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            margin-bottom: 0.75rem;
+            border-left: 4px solid;
+        }
+        
+        .rec-item.critical { border-left-color: var(--crit); }
+        .rec-item.warning { border-left-color: var(--warn); }
+        .rec-item.good { border-left-color: var(--success); }
+        .rec-item.normal { border-left-color: var(--info); }
+        
+        .rec-icon { font-size: 1.5rem; }
+        .rec-title { font-weight: 600; margin-bottom: 0.25rem; }
+        .rec-desc { font-size: 0.85rem; color: var(--text-muted); }
+        
         /* Heatmap Calendar */
         .heatmap-container {
             padding: 10px 0;
@@ -1327,6 +1461,34 @@ def home():
                 <div style="margin-top:15px; text-align:right; font-size:0.9rem; color: var(--text-muted)">
                     Simulated Additional Load: <span id="sim-val" style="color: var(--accent); font-weight: 700">0W</span>
                 </div>
+            </div>
+
+            <!-- RECOMMENDATIONS -->
+            <div class="col-6 card">
+                <div class="card-title">📝 Recommendations</div>
+                {% for rec in recommendation_items %}
+                <div class="rec-item {{ rec.class }}">
+                    <div class="rec-icon">{{ rec.icon }}</div>
+                    <div>
+                        <div class="rec-title">{{ rec.title }}</div>
+                        <div class="rec-desc">{{ rec.description }}</div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+
+            <!-- SCHEDULE -->
+            <div class="col-6 card">
+                <div class="card-title">📅 Today's Schedule</div>
+                {% for item in schedule_items %}
+                <div class="rec-item {{ item.class }}" style="border-left: 3px solid {{ 'var(--primary)' if 'good' in item.class else 'var(--warning)' }}">
+                    <div class="rec-icon">{{ item.icon }}</div>
+                    <div>
+                        <div class="rec-title">{{ item.title }}</div>
+                        <div class="rec-desc">{{ item.time }}</div>
+                    </div>
+                </div>
+                {% endfor %}
             </div>
 
             <!-- BATTERY PROJECTION -->
@@ -1833,7 +1995,8 @@ def home():
         s_fc=s_fc, l_fc=l_fc, sim=sim, breakdown=breakdown, schedule=schedule,
         heatmap=heatmap, alerts=alerts, hourly_24h=hourly_24h,
         tier_labels=tier_labels, primary_pct=primary_pct, 
-        backup_voltage=backup_voltage, backup_pct=backup_pct
+        backup_voltage=backup_voltage, backup_pct=backup_pct,
+        recommendation_items=recommendation_items, schedule_items=schedule_items
     )
 
 if __name__ == '__main__':
