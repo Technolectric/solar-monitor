@@ -2,11 +2,19 @@ import os
 import time
 import requests
 import json
+import csv
+import numpy as np
+import pandas as pd
 from datetime import datetime, timedelta, timezone
 from threading import Thread
 from flask import Flask, render_template_string, request, jsonify
-from collections import deque
 from pathlib import Path
+
+# ML Imports
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.cluster import KMeans
+import warnings
+warnings.filterwarnings('ignore') # Silence sklearn warnings for clean logs
 
 # ----------------------------
 # Flask App & Config
@@ -20,6 +28,7 @@ SERIAL_NUMBERS = os.getenv("SERIAL_NUMBERS", "").split(",")
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
 DATA_FILE = "load_patterns.json"
 HISTORY_FILE = "daily_history.json"
+TRAINING_FILE = "training_data.csv" # New file for granular ML data
 
 # Inverter Mapping
 INVERTER_CONFIG = {
@@ -44,7 +53,85 @@ SENDER_EMAIL = os.getenv('SENDER_EMAIL')
 RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL')
 
 # ----------------------------
-# 1. Logic Engine: Persistence & Detection
+# 1. AI Engine: Smart Load Detector
+# ----------------------------
+class SmartLoadDetector:
+    def __init__(self, training_file):
+        self.filename = training_file
+        self.model = None
+        self.cluster_names = {}
+        self.ensure_file_exists()
+        self.train_model()
+
+    def ensure_file_exists(self):
+        if not Path(self.filename).exists():
+            with open(self.filename, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['timestamp', 'hour', 'day_of_week', 'watts'])
+
+    def log_data(self, watts):
+        """Logs a data point for future training"""
+        now = datetime.now(EAT)
+        with open(self.filename, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([now.isoformat(), now.hour, now.weekday(), watts])
+
+    def train_model(self):
+        """
+        Uses K-Means clustering to find distinct 'Load States' from history,
+        then maps them to human-readable names based on wattage.
+        """
+        try:
+            df = pd.read_csv(self.filename)
+            if len(df) < 50: # Need some data to start learning
+                print("AI: Not enough data to train yet (<50 points).")
+                return
+
+            # Prepare data: We cluster based on Watts primarily
+            X = df[['watts']].values
+            
+            # K-Means Clustering: Find 5 distinct usage levels
+            kmeans = KMeans(n_clusters=5, random_state=42)
+            df['cluster'] = kmeans.fit_predict(X)
+            
+            # Analyze clusters to name them (Heuristics for 2 houses)
+            cluster_centers = kmeans.cluster_centers_.flatten()
+            
+            # Map clusters to names based on their center Wattage
+            for cluster_id, center_watts in enumerate(cluster_centers):
+                name = "Unknown"
+                if center_watts < 600: name = "Idle / Base Load (Both Houses)"
+                elif 600 <= center_watts < 1500: name = "Moderate (TVs/Lights/Computers)"
+                elif 1500 <= center_watts < 3000: name = "High (Cooking/Pumps - Single House)"
+                elif 3000 <= center_watts < 5000: name = "Very High (Cooking/AC - Both Houses)"
+                else: name = "Peak Load (Limit Exceeded)"
+                
+                self.cluster_names[cluster_id] = f"{name} (~{int(center_watts)}W)"
+
+            # Train a Classifier to predict the Cluster ID based on Wattage AND Time
+            # This helps the AI learn "At 6PM, 2000W is likely cooking" vs "At 2AM 2000W is weird"
+            self.model = RandomForestClassifier(n_estimators=50)
+            self.model.fit(df[['watts', 'hour', 'day_of_week']], df['cluster'])
+            print("AI: Model trained successfully on historical patterns.")
+
+        except Exception as e:
+            print(f"AI Training Error: {e}")
+
+    def predict_load(self, watts):
+        """Returns the AI's classification of the current load"""
+        if self.model is None:
+            # Fallback if no model yet
+            if watts < 600: return "Collecting Data (Idle)"
+            if watts < 2000: return "Collecting Data (Moderate)"
+            return "Collecting Data (High)"
+            
+        now = datetime.now(EAT)
+        # Predict the cluster based on current watts + time context
+        cluster_pred = self.model.predict([[watts, now.hour, now.weekday()]])[0]
+        return self.cluster_names.get(cluster_pred, "Unknown Load")
+
+# ----------------------------
+# 2. Logic Engine: Persistence & Detection
 # ----------------------------
 class PersistentLoadManager:
     def __init__(self, filename):
@@ -125,7 +212,6 @@ class DailyHistoryManager:
                 'solar': 0,
                 'potential': max_solar_potential_wh
             }
-        # Update if exists, or set new
         self.history[date_str]['consumption'] = total_consumption_wh
         self.history[date_str]['solar'] = total_solar_wh
         self.history[date_str]['potential'] = max_solar_potential_wh
@@ -160,6 +246,8 @@ class DailyHistoryManager:
 
 load_manager = PersistentLoadManager(DATA_FILE)
 history_manager = DailyHistoryManager(HISTORY_FILE)
+# Initialize the AI Engine
+ai_detector = SmartLoadDetector(TRAINING_FILE)
 
 def identify_active_appliances(current, previous, gen_active, backup_volts, primary_pct):
     detected = []
@@ -167,11 +255,10 @@ def identify_active_appliances(current, previous, gen_active, backup_volts, prim
     if gen_active:
         if primary_pct > 42: detected.append("Water Heating")
         else: detected.append("System Charging")
-    if current < 400: detected.append("Idle")
-    elif 1000 <= current <= 1350: detected.append("Pool Pump")
-    elif current > 1800: detected.append("Cooking")
-    elif 400 <= current < 1000: detected.append("TV/Lights")
-    if delta > 1500: detected.append("Kettle")
+    
+    # Heuristics still useful for specific transient events
+    if delta > 1500: detected.append("High Power On (Kettle/Pump)")
+    
     return detected
 
 # ----------------------------
@@ -359,6 +446,7 @@ latest_data = {
     "timestamp": "Initializing...", "total_output_power": 0, "total_solar_input_W": 0,
     "primary_battery_min": 0, "backup_battery_voltage": 0, "backup_active": False,
     "generator_running": False, "inverters": [], "detected_appliances": [], 
+    "ai_load_analysis": "Gathering Data...",
     "solar_forecast": [], "load_forecast": [], 
     "battery_sim": {"labels": [], "data": [], "tiers": []},
     "energy_breakdown": {"chart_data": [1, 0, 1], "total_pct": 0, "total_kwh": 0},
@@ -388,26 +476,15 @@ def generate_solar_forecast(weather_data):
     return forecast
 
 def get_daily_solar_potential(date_str):
-    """
-    Fetches the actual solar radiation for a specific past date to calculate
-    theoretical maximum yield for that specific day (weather-aware).
-    """
     try:
         url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=shortwave_radiation&timezone=Africa/Nairobi&start_date={date_str}&end_date={date_str}"
         r = requests.get(url, timeout=10).json()
-        
         if 'hourly' in r and 'shortwave_radiation' in r['hourly']:
             total_rad_wh_m2 = sum([val for val in r['hourly']['shortwave_radiation'] if val is not None])
-            
-            # Formula: (Total Radiation / 1000 W/m²) * System Size (W) * Efficiency
-            # 1000 W/m² is the Standard Test Condition (STC) irradiance
             theoretical_wh = (total_rad_wh_m2 / 1000.0) * (TOTAL_SOLAR_CAPACITY_KW * 1000) * SOLAR_EFFICIENCY_FACTOR
             return theoretical_wh
-            
     except Exception as e:
         print(f"Error fetching historical weather for {date_str}: {e}")
-        
-    # Fallback to static calculation if API fails
     return TOTAL_SOLAR_CAPACITY_KW * 1000 * 10
 
 def send_email(subject, html, alert_type="general"):
@@ -487,9 +564,7 @@ def poll_growatt():
             current_date = now.strftime('%Y-%m-%d')
             if daily_accumulator['last_date'] != current_date:
                 if daily_accumulator['last_date']:
-                    # Fetch weather-aware potential for the day that just finished
                     weather_potential_wh = get_daily_solar_potential(daily_accumulator['last_date'])
-                    
                     history_manager.update_daily(
                         daily_accumulator['last_date'],
                         daily_accumulator['consumption_wh'],
@@ -497,6 +572,8 @@ def poll_growatt():
                         weather_potential_wh
                     )
                     history_manager.save_history()
+                    # Re-train ML model daily
+                    ai_detector.train_model()
                 daily_accumulator = {'consumption_wh': 0, 'solar_wh': 0, 'last_date': current_date}
             
             interval_hours = POLL_INTERVAL_MINUTES / 60.0
@@ -507,6 +584,11 @@ def poll_growatt():
             detected = identify_active_appliances(tot_out, prev_watts, gen_on, b_volts, p_min)
             is_manual_gen = any("Water" in x for x in detected)
             if not is_manual_gen: load_manager.update(tot_out)
+            
+            # Log for ML and Predict
+            ai_detector.log_data(tot_out)
+            ai_analysis = ai_detector.predict_load(tot_out)
+            
             history_manager.add_hourly_datapoint(now, tot_out, tot_bat, tot_sol)
             
             if gen_on: send_email("Generator ON", "Generator running", "gen")
@@ -548,6 +630,7 @@ def poll_growatt():
                 "backup_active": b_act,
                 "generator_running": gen_on,
                 "detected_appliances": detected,
+                "ai_load_analysis": ai_analysis,
                 "load_forecast": l_cast[:12],
                 "solar_forecast": s_cast[:12],
                 "battery_sim": sim_res,
@@ -557,7 +640,7 @@ def poll_growatt():
                 "heatmap_data": heatmap,
                 "hourly_24h": hourly_24h
             }
-            print(f"Update: Load={tot_out}W, Battery={breakdown['total_pct']}%")
+            print(f"Update: Load={tot_out}W, Analysis={ai_analysis}")
             
         except Exception as e: print(f"Error: {e}")
         if polling_active:
@@ -626,6 +709,8 @@ def home():
     primary_pct = breakdown.get('primary_pct', 0)
     backup_voltage = breakdown.get('backup_voltage', 0)
     backup_pct = breakdown.get('backup_pct', 0)
+    
+    ai_analysis = d.get('ai_load_analysis', 'Initializing...')
 
     html = """
 <!DOCTYPE html>
@@ -1119,6 +1204,17 @@ def home():
                 <div class="card-title">Grid Status</div>
                 <div class="metric-val" style="color:{{ 'var(--crit)' if gen_on else 'var(--text-dim)' }}">{{ 'ON' if gen_on else 'OFF' }}</div>
                 <div class="metric-unit">Generator/Grid</div>
+            </div>
+            
+            <!-- AI LOAD ANALYSIS -->
+            <div class="col-12 card" style="border: 1px solid var(--accent); background: rgba(99, 102, 241, 0.1);">
+                <div class="card-title" style="color: var(--accent); font-weight: 800;">AI Load Analysis</div>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div style="font-size: 1.5rem; font-weight: 700; color: var(--text);">
+                        {{ ai_analysis }}
+                    </div>
+                    <div style="font-size: 0.8rem; opacity: 0.7;">Based on real-time clustering</div>
+                </div>
             </div>
 
             <!-- 30-DAY HEATMAP -->
@@ -1674,7 +1770,8 @@ def home():
         s_fc=s_fc, l_fc=l_fc, sim=sim, breakdown=breakdown, schedule=schedule,
         heatmap=heatmap, alerts=alerts, hourly_24h=hourly_24h,
         tier_labels=tier_labels, primary_pct=primary_pct, 
-        backup_voltage=backup_voltage, backup_pct=backup_pct
+        backup_voltage=backup_voltage, backup_pct=backup_pct,
+        ai_analysis=ai_analysis
     )
 
 if __name__ == '__main__':
