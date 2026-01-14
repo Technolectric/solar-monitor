@@ -570,7 +570,15 @@ def home():
     gen_on = d.get("generator_running", False)
     detected = d.get("detected_appliances", [])
     
-    breakdown = d.get("energy_breakdown") or {"chart_data": [1,0,1], "total_pct": 0, "total_kwh": 0}
+    breakdown = d.get("energy_breakdown") or {
+        "chart_data": [1,0,1,1], 
+        "tier_labels": ['Primary (100-40%)', 'Backup (80-20%)', 'Emergency (40-20%)', 'Empty'],
+        "total_pct": 0, 
+        "total_kwh": 0,
+        "primary_pct": 0,
+        "backup_voltage": 0,
+        "backup_pct": 0
+    }
     sim = d.get("battery_sim") or {"labels": [], "data": []}
     s_fc = d.get("solar_forecast") or []
     l_fc = d.get("load_forecast") or []
@@ -590,6 +598,10 @@ def home():
     c_load = [x['estimated_load'] for x in l_fc] if l_fc else []
     c_solar = [x['estimated_generation'] for x in s_fc[:len(l_fc)]] if s_fc else []
     alerts = alert_history[:8]
+    tier_labels = breakdown.get('tier_labels', ['Primary (100-40%)', 'Backup (80-20%)', 'Emergency (40-20%)', 'Empty'])
+    primary_pct = breakdown.get('primary_pct', 0)
+    backup_voltage = breakdown.get('backup_voltage', 0)
+    backup_pct = breakdown.get('backup_pct', 0)
 
     html = """
 <!DOCTYPE html>
@@ -1170,8 +1182,8 @@ def home():
                     {{ breakdown['total_kwh'] }} kWh Available
                 </div>
                 <div style="margin-top:10px; padding-top:10px; border-top: 1px solid var(--border); font-size:0.75rem; color: var(--text-dim)">
-                    <div>Primary: {{ breakdown['primary_pct'] }}%</div>
-                    <div>Backup: {{ breakdown['backup_voltage'] }}V ({{ breakdown['backup_pct'] }}%)</div>
+                    <div>Primary: {{ primary_pct }}%</div>
+                    <div>Backup: {{ backup_voltage }}V ({{ backup_pct }}%)</div>
                 </div>
             </div>
 
@@ -1220,7 +1232,7 @@ def home():
         const sForecast = {{ s_fc|tojson }};
         const lForecast = {{ l_fc|tojson }};
         const pieData = {{ breakdown['chart_data']|tojson }};
-        const tierLabels = {{ breakdown['tier_labels']|tojson }};
+        const tierLabels = {{ tier_labels|tojson }};
         const hourly24h = {{ hourly_24h|tojson }};
         
         // Sim State
@@ -1547,7 +1559,9 @@ def home():
         gen_on=gen_on, detected=detected, st_txt=st_txt, st_col=st_col,
         is_charging=is_charging, is_discharging=is_discharging,
         s_fc=s_fc, l_fc=l_fc, sim=sim, breakdown=breakdown, schedule=schedule,
-        heatmap=heatmap, alerts=alerts, hourly_24h=hourly_24h
+        heatmap=heatmap, alerts=alerts, hourly_24h=hourly_24h,
+        tier_labels=tier_labels, primary_pct=primary_pct, 
+        backup_voltage=backup_voltage, backup_pct=backup_pct
     )
 
 if __name__ == '__main__':
