@@ -401,6 +401,7 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts):
 headers = {"token": TOKEN, "Content-Type": "application/x-www-form-urlencoded"} if TOKEN else {}
 last_alert_time, alert_history = {}, []
 daily_accumulator = {'consumption_wh': 0, 'solar_wh': 0, 'last_date': None}
+last_communication = {}
 
 # Pool pump monitoring
 pool_pump_start_time = None
@@ -480,6 +481,51 @@ def send_email(subject, html, alert_type="general", send_via_email=True):
     alert_history.insert(0, {"timestamp": now, "type": alert_type, "subject": subject})
     alert_history = alert_history[:20]
 
+def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run):
+    """
+    Comprehensive alert checking from Render version.
+    Checks inverter health, battery status, and discharge levels.
+    """
+    inv1 = next((i for i in inv_data if i['SN'] == 'RKG3B0400T'), None)
+    inv2 = next((i for i in inv_data if i['SN'] == 'KAM4N5W0AG'), None)
+    inv3 = next((i for i in inv_data if i['SN'] == 'JNK1CDR0KQ'), None)
+    if not all([inv1, inv2, inv3]): return
+    
+    p_cap = min(inv1['Capacity'], inv2['Capacity'])
+    b_active = inv3['OutputPower'] > 50
+    b_volt = inv3['vBat']
+    
+    # Inverter health checks
+    for inv in inv_data:
+        if inv.get('communication_lost'): 
+            send_email(f"⚠️ Comm Lost: {inv['Label']}", "Check inverter", "communication_lost")
+        if inv.get('has_fault'): 
+            send_email(f"🚨 FAULT: {inv['Label']}", "Fault code", "fault_alarm")
+        if inv.get('high_temperature'): 
+            send_email(f"🌡️ High Temp: {inv['Label']}", f"Temp: {inv['temperature']}", "high_temperature")
+    
+    # Critical: Generator or backup voltage low
+    if gen_run or b_volt < 51.2:
+        send_email("🚨 CRITICAL: Generator Running", "Backup critical", "critical")
+        return
+    
+    # High alert: Backup active with low primary
+    if b_active and p_cap < 40:
+        send_email("⚠️ HIGH ALERT: Backup Active", "Reduce Load", "backup_active")
+        return
+    
+    # Warning: Primary low
+    if 40 < p_cap < 50:
+        send_email("⚠️ Primary Low", "Reduce Load", "warning", send_via_email=b_active)
+    
+    # Discharge level alerts - only send email if backup is active
+    if bat_discharge >= 4500: 
+        send_email("🚨 URGENT: High Discharge", "Critical", "very_high_load", send_via_email=b_active)
+    elif 2500 <= bat_discharge < 4500: 
+        send_email("⚠️ High Discharge", "Warning", "high_load", send_via_email=b_active)
+    elif 1500 <= bat_discharge < 2000 and p_cap < 50: 
+        send_email("ℹ️ Moderate Discharge", "Info", "moderate_load", send_via_email=b_active)
+
 # ----------------------------
 # 4. Polling Loop
 # ----------------------------
@@ -487,7 +533,7 @@ polling_active = False
 polling_thread = None
 
 def poll_growatt():
-    global latest_data, polling_active, daily_accumulator, pool_pump_start_time, pool_pump_last_alert
+    global latest_data, polling_active, daily_accumulator, pool_pump_start_time, pool_pump_last_alert, last_communication
     if not TOKEN: return
 
     wx_data = get_weather_forecast()
@@ -515,26 +561,60 @@ def poll_growatt():
 
                         if json_resp.get("error_code") == 0:
                             d = json_resp.get("data", {})
+                            last_communication[sn] = now  # Track successful communication
+                            
                             op = float(d.get("outPutPower") or 0)
                             cap = float(d.get("capacity") or 0)
                             vb = float(d.get("vBat") or 0)
                             pb = float(d.get("pBat") or 0)
                             sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
-                            temp = float(d.get("temperature") or 0)
+                            temp = max(
+                                float(d.get("invTemperature") or 0),
+                                float(d.get("dcDcTemperature") or 0),
+                                float(d.get("temperature") or 0)
+                            )
+                            flt = int(d.get("errorCode") or 0) != 0
 
                             tot_out += op
                             tot_sol += sol
                             if pb > 0: tot_bat += pb
 
                             cfg = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown"})
-                            info = {"SN": sn, "Label": cfg['label'], "OutputPower": op, "Capacity": cap, "vBat": vb, "temp": temp}
+                            info = {
+                                "SN": sn, 
+                                "Label": cfg['label'], 
+                                "OutputPower": op, 
+                                "Capacity": cap, 
+                                "vBat": vb, 
+                                "temp": temp,
+                                "temperature": temp,
+                                "high_temperature": temp >= 60,
+                                "has_fault": flt,
+                                "communication_lost": False
+                            }
                             inv_data.append(info)
 
                             if cfg['type'] == 'primary': p_caps.append(cap)
                             elif cfg['type'] == 'backup':
                                 b_data = info
                                 if float(d.get("vac") or 0) > 100 or float(d.get("pAcInPut") or 0) > 50: gen_on = True
-                except: pass
+                except:
+                    # Check if communication has been lost for more than 10 minutes
+                    if sn in last_communication and (now - last_communication[sn]) > timedelta(minutes=10):
+                        cfg = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown"})
+                        inv_data.append({
+                            "SN": sn, 
+                            "Label": cfg.get('label', sn), 
+                            "Type": cfg.get('type'),
+                            "OutputPower": 0,
+                            "Capacity": 0,
+                            "vBat": 0,
+                            "temp": 0,
+                            "temperature": 0,
+                            "high_temperature": False,
+                            "has_fault": False,
+                            "communication_lost": True
+                        })
 
             p_min = min(p_caps) if p_caps else 0
             b_volts = b_data['vBat'] if b_data else 0
@@ -567,14 +647,9 @@ def poll_growatt():
             
             history_manager.add_hourly_datapoint(now, tot_out, tot_bat, tot_sol)
 
-            # IMPROVED: Alert logic with manual generator detection
-            # Don't send generator alert if it's manually on for water heating
-            if gen_on and not is_manual_gen: 
-                send_email("Generator ON", "Generator running", "gen", send_via_email=True)
-            
-            # Critical battery alert
-            if p_min < 30: 
-                send_email("Battery Critical", f"Primary at {p_min}%", "crit", send_via_email=True)
+            # COMPREHENSIVE ALERT SYSTEM from Render
+            # Note: solar_conditions_cache would be from weather analysis, using None for now
+            check_alerts(inv_data, None, tot_sol, tot_bat, gen_on)
 
             # Pool pump monitoring - check for sustained high discharge after 4pm
             if now.hour >= 16:
