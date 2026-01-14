@@ -218,36 +218,34 @@ APPLIANCE_PROFILES = [
 
 def generate_smart_schedule(
     battery_soc_pct,
-    battery_kwh_available,
-    solar_forecast_kw,
-    load_forecast_kw,
+    battery_kwh_available=None,
+    solar_forecast_kw=0,
+    load_forecast_kw=0,
     now_hour=None
 ):
     """
-    Forecast-aware appliance decision engine.
+    Backward-compatible smart appliance scheduler.
 
-    Inputs:
-    - battery_soc_pct: minimum SOC of primary batteries (%)
-    - battery_kwh_available: usable battery energy (kWh)
-    - solar_forecast_kw: expected solar production (kW, next window)
-    - load_forecast_kw: expected base load (kW, next window)
-    - now_hour: optional hour (0-23) for day/night logic
+    Works with BOTH:
+    - Old calls (battery_soc_pct only)
+    - New forecast-aware calls
     """
+
+    # -----------------------------
+    # Safe defaults (prevents crash)
+    # -----------------------------
+    if battery_kwh_available is None:
+        battery_kwh_available = 0
 
     advice = []
 
-    # --------------------------------------------------------
-    # Global conditions
-    # --------------------------------------------------------
     solar_surplus_kw = max(solar_forecast_kw - load_forecast_kw, 0)
     is_daytime = now_hour is None or (7 <= now_hour <= 18)
-
-    # Conservative safety floor
     battery_soc_floor = 40
 
     for app in APPLIANCE_PROFILES:
-        app_kwh_required = (app["watts"] * app["hours"]) / 1000
         app_kw = app["watts"] / 1000
+        app_kwh_required = (app["watts"] * app["hours"]) / 1000
 
         decision = {
             "msg": "Wait",
@@ -256,18 +254,18 @@ def generate_smart_schedule(
             "reason": ""
         }
 
-        # ----------------------------------------------------
-        # RULE 1: Hard battery protection
-        # ----------------------------------------------------
+        # -----------------------------
+        # Rule 1: Battery protection
+        # -----------------------------
         if battery_soc_pct < battery_soc_floor:
             decision.update({
                 "msg": "Battery Too Low",
                 "reason": f"SOC {battery_soc_pct:.0f}% below safety floor"
             })
 
-        # ----------------------------------------------------
-        # RULE 2: Solar surplus can run appliance directly
-        # ----------------------------------------------------
+        # -----------------------------
+        # Rule 2: Solar surplus
+        # -----------------------------
         elif solar_surplus_kw >= app_kw and is_daytime:
             decision.update({
                 "msg": "Safe to Run (Solar)",
@@ -276,9 +274,9 @@ def generate_smart_schedule(
                 "reason": f"Solar surplus {solar_surplus_kw:.1f} kW"
             })
 
-        # ----------------------------------------------------
-        # RULE 3: Battery-backed operation
-        # ----------------------------------------------------
+        # -----------------------------
+        # Rule 3: Battery-backed run
+        # -----------------------------
         elif (
             battery_kwh_available >= app_kwh_required * 1.3
             and battery_soc_pct >= 60
@@ -290,18 +288,18 @@ def generate_smart_schedule(
                 "reason": f"Battery {battery_kwh_available:.1f} kWh available"
             })
 
-        # ----------------------------------------------------
-        # RULE 4: Suggest waiting for solar window
-        # ----------------------------------------------------
+        # -----------------------------
+        # Rule 4: Daytime wait
+        # -----------------------------
         elif is_daytime:
             decision.update({
                 "msg": "Wait for More Solar",
                 "reason": f"Surplus {solar_surplus_kw:.1f} kW < {app_kw:.1f} kW needed"
             })
 
-        # ----------------------------------------------------
-        # RULE 5: Night-time protection
-        # ----------------------------------------------------
+        # -----------------------------
+        # Rule 5: Night protection
+        # -----------------------------
         else:
             decision.update({
                 "msg": "Avoid Night Use",
@@ -1674,5 +1672,6 @@ def home():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+
 
 
