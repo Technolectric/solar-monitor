@@ -125,8 +125,10 @@ class DailyHistoryManager:
                 'solar': 0,
                 'potential': max_solar_potential_wh
             }
+        # Update if exists, or set new
         self.history[date_str]['consumption'] = total_consumption_wh
         self.history[date_str]['solar'] = total_solar_wh
+        self.history[date_str]['potential'] = max_solar_potential_wh
         
         dates = sorted(self.history.keys())
         if len(dates) > 30:
@@ -183,25 +185,18 @@ APPLIANCE_PROFILES = [
 ]
 
 def get_energy_status(p_pct, b_volts):
-    """
-    Centralized physics engine to calculate system state.
-    Used by both current status (donut) and simulation (forecast).
-    """
     p_total_wh = PRIMARY_BATTERY_CAPACITY_WH
     b_total_wh = BACKUP_BATTERY_DEGRADED_WH * BACKUP_DEGRADATION
     
-    # Calculate current Wh
     curr_p_wh = (p_pct / 100.0) * p_total_wh
     b_pct = max(0, min(100, (b_volts - 51.0) / 2.0 * 100))
     curr_b_wh = (b_pct / 100.0) * b_total_wh
     
-    # Calculate Capacities (Tiers)
     primary_tier1_capacity = p_total_wh * 0.60
     backup_capacity = b_total_wh * 0.80
     emergency_capacity = p_total_wh * 0.20
     total_system_capacity = primary_tier1_capacity + backup_capacity + emergency_capacity
     
-    # Calculate Available Energy (Tiers)
     primary_tier1_available = max(0, curr_p_wh - (p_total_wh * 0.40))
     backup_available = max(0, curr_b_wh - (b_total_wh * 0.20))
     emergency_available = max(0, min(curr_p_wh, p_total_wh * 0.40) - (p_total_wh * 0.20))
@@ -209,7 +204,6 @@ def get_energy_status(p_pct, b_volts):
     total_available = primary_tier1_available + backup_available + emergency_available
     total_pct = (total_available / total_system_capacity * 100) if total_system_capacity > 0 else 0
     
-    # Determine Active Tier
     if primary_tier1_available > 0: active_tier = 'primary'
     elif backup_available > 0: active_tier = 'backup'
     elif emergency_available > 0: active_tier = 'reserve'
@@ -226,9 +220,8 @@ def get_energy_status(p_pct, b_volts):
     }
 
 def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now_hour=None):
-    """Smart appliance scheduler."""
     battery_kwh_available = status['total_available_wh'] / 1000
-    battery_soc_pct = status['total_pct']  # Use total system availability
+    battery_soc_pct = status['total_pct']
 
     current_solar_kw = solar_forecast_kw
     if isinstance(solar_forecast_kw, list) and len(solar_forecast_kw) > 0:
@@ -268,9 +261,7 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
     return advice
 
 def calculate_battery_breakdown(p_pct, b_volts):
-    """Calculates breakdown for circular chart using centralized logic."""
     status = get_energy_status(p_pct, b_volts)
-    
     return {
         'chart_data': [round(x / 1000, 1) for x in status['breakdown_wh']],
         'tier_labels': ['Primary', 'Backup', 'Reserve'],
@@ -279,40 +270,27 @@ def calculate_battery_breakdown(p_pct, b_volts):
         'primary_pct': p_pct,
         'backup_voltage': round(b_volts, 1),
         'backup_pct': round(status['b_pct'], 1),
-        'status_obj': status # For internal use
+        'status_obj': status
     }
 
 def calculate_battery_cascade(solar, load, p_pct, b_volts):
-    """
-    Simulates battery levels. 
-    CRITICAL: Anchors the first data point to current breakdown state.
-    """
     if not solar or not load: return {'labels': [], 'data': [], 'tiers': []}
-    
-    # 1. Initialize logic with current state
     start_status = get_energy_status(p_pct, b_volts)
-    
     curr_p_wh = start_status['curr_p_wh']
     curr_b_wh = start_status['curr_b_wh']
     
-    # Constants
     p_total_wh = PRIMARY_BATTERY_CAPACITY_WH
     b_total_wh = BACKUP_BATTERY_DEGRADED_WH * BACKUP_DEGRADATION
     
-    # 2. Set Start Points (Time 0)
     sim_data = [start_status['total_pct']]
-    sim_labels = ["Now"] # Corresponds to current state
+    sim_labels = ["Now"]
     tier_info = [start_status['active_tier']]
     
-    # 3. Simulate future steps
-    # We iterate through forecast (Duration: N hours).
-    # Step i calculates the state at the END of hour i.
     count = min(len(solar), len(load))
     
     for i in range(count):
         net = solar[i]['estimated_generation'] - load[i]['estimated_load']
         
-        # Apply physics
         if net > 0:
             space_in_primary = p_total_wh - curr_p_wh
             if net <= space_in_primary:
@@ -323,7 +301,6 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts):
                 curr_b_wh = min(b_total_wh, curr_b_wh + overflow)
         else:
             drain = abs(net)
-            # Tier 1 Drain
             primary_min = p_total_wh * 0.40
             available_tier1 = max(0, curr_p_wh - primary_min)
             
@@ -334,7 +311,6 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts):
                 curr_p_wh = primary_min
                 drain -= available_tier1
             
-            # Tier 2 Drain
             if drain > 0:
                 backup_min = b_total_wh * 0.20
                 available_backup = max(0, curr_b_wh - backup_min)
@@ -346,7 +322,6 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts):
                     curr_b_wh = backup_min
                     drain -= available_backup
             
-            # Tier 3 Drain
             if drain > 0:
                 emergency_min = p_total_wh * 0.20
                 available_emergency = max(0, curr_p_wh - emergency_min)
@@ -356,27 +331,19 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts):
                 else:
                     curr_p_wh = emergency_min
         
-        # Calculate resulting state percentage using helper logic
-        # We manually recalc available energy here because calling get_energy_status 
-        # inside loop is expensive if we just want one number, but let's stick to inline math for speed
         primary_tier1_avail = max(0, curr_p_wh - (p_total_wh * 0.40))
         backup_avail = max(0, curr_b_wh - (b_total_wh * 0.20))
         emergency_avail = max(0, min(curr_p_wh, p_total_wh * 0.40) - (p_total_wh * 0.20))
-        
         total_capacity = (p_total_wh * 0.60) + (b_total_wh * 0.80) + (p_total_wh * 0.20)
         total_available = primary_tier1_avail + backup_avail + emergency_avail
-        
         percentage = (total_available / total_capacity) * 100 if total_capacity > 0 else 0
         
-        # Determine active tier
         if primary_tier1_avail > 0: active_tier = 'primary'
         elif backup_avail > 0: active_tier = 'backup'
         elif emergency_avail > 0: active_tier = 'reserve'
         else: active_tier = 'empty'
         
-        # Add point
         sim_data.append(percentage)
-        # Label is the time from the forecast (representing the end of that hour interval)
         sim_labels.append(solar[i]['time'].strftime('%H:%M'))
         tier_info.append(active_tier)
     
@@ -419,6 +386,29 @@ def generate_solar_forecast(weather_data):
         est = (rad / 1000.0) * (TOTAL_SOLAR_CAPACITY_KW * 1000) * SOLAR_EFFICIENCY_FACTOR
         forecast.append({'time': ft, 'estimated_generation': est})
     return forecast
+
+def get_daily_solar_potential(date_str):
+    """
+    Fetches the actual solar radiation for a specific past date to calculate
+    theoretical maximum yield for that specific day (weather-aware).
+    """
+    try:
+        url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=shortwave_radiation&timezone=Africa/Nairobi&start_date={date_str}&end_date={date_str}"
+        r = requests.get(url, timeout=10).json()
+        
+        if 'hourly' in r and 'shortwave_radiation' in r['hourly']:
+            total_rad_wh_m2 = sum([val for val in r['hourly']['shortwave_radiation'] if val is not None])
+            
+            # Formula: (Total Radiation / 1000 W/m²) * System Size (W) * Efficiency
+            # 1000 W/m² is the Standard Test Condition (STC) irradiance
+            theoretical_wh = (total_rad_wh_m2 / 1000.0) * (TOTAL_SOLAR_CAPACITY_KW * 1000) * SOLAR_EFFICIENCY_FACTOR
+            return theoretical_wh
+            
+    except Exception as e:
+        print(f"Error fetching historical weather for {date_str}: {e}")
+        
+    # Fallback to static calculation if API fails
+    return TOTAL_SOLAR_CAPACITY_KW * 1000 * 10
 
 def send_email(subject, html, alert_type="general"):
     global last_alert_time, alert_history
@@ -497,11 +487,14 @@ def poll_growatt():
             current_date = now.strftime('%Y-%m-%d')
             if daily_accumulator['last_date'] != current_date:
                 if daily_accumulator['last_date']:
+                    # Fetch weather-aware potential for the day that just finished
+                    weather_potential_wh = get_daily_solar_potential(daily_accumulator['last_date'])
+                    
                     history_manager.update_daily(
                         daily_accumulator['last_date'],
                         daily_accumulator['consumption_wh'],
                         daily_accumulator['solar_wh'],
-                        TOTAL_SOLAR_CAPACITY_KW * 1000 * 10
+                        weather_potential_wh
                     )
                     history_manager.save_history()
                 daily_accumulator = {'consumption_wh': 0, 'solar_wh': 0, 'last_date': current_date}
