@@ -184,6 +184,10 @@ def identify_active_appliances(current, previous, gen_active, backup_volts, prim
 # 2. Physics & Scheduler Engine
 # ----------------------------
 
+# ============================================================
+# SMART APPLIANCE SCHEDULER (FORECAST-AWARE DECISION ENGINE)
+# ============================================================
+
 APPLIANCE_PROFILES = [
     {
         "id": "pool",
@@ -314,6 +318,7 @@ def generate_smart_schedule(
         })
 
     return advice
+
 def calculate_battery_breakdown(p_pct, b_volts):
     """
     Calculates breakdown for circular chart with tiered discharge strategy:
@@ -1669,4 +1674,5 @@ def home():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+
 
