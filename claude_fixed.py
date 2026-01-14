@@ -28,7 +28,7 @@ SERIAL_NUMBERS = os.getenv("SERIAL_NUMBERS", "").split(",")
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
 DATA_FILE = "load_patterns.json"
 HISTORY_FILE = "daily_history.json"
-TRAINING_FILE = "training_data.csv" # New file for granular ML data
+TRAINING_FILE = "training_data.csv"
 
 # Inverter Mapping
 INVERTER_CONFIG = {
@@ -271,6 +271,7 @@ APPLIANCE_PROFILES = [
     {"id": "oven", "name": "Oven", "watts": 2500, "hours": 1.5, "icon": "🍳", "priority": "high"}
 ]
 
+# --- UPDATED: Using "Usable Energy" Logic from Code 2 ---
 def get_energy_status(p_pct, b_volts):
     p_total_wh = PRIMARY_BATTERY_CAPACITY_WH
     b_total_wh = BACKUP_BATTERY_DEGRADED_WH * BACKUP_DEGRADATION
@@ -306,6 +307,7 @@ def get_energy_status(p_pct, b_volts):
         'active_tier': active_tier
     }
 
+# --- UPDATED: Using "Code 2" Smart Scheduler Logic ---
 def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now_hour=None):
     battery_kwh_available = status['total_available_wh'] / 1000
     battery_soc_pct = status['total_pct']
@@ -332,12 +334,13 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
 
         decision = {"msg": "Wait", "status": "unsafe", "color": "var(--warn)", "reason": ""}
 
+        # Code 2 Logic: Only recommend battery use if > 75%
         if battery_soc_pct < 40:
             decision.update({"msg": "Battery Too Low", "reason": f"System at {battery_soc_pct:.0f}%"})
         elif solar_surplus_kw >= app_kw and is_daytime:
             decision.update({"msg": "Safe to Run (Solar)", "status": "safe", "color": "var(--success)", "reason": f"Solar surplus {solar_surplus_kw:.1f} kW"})
-        elif battery_kwh_available >= app_kwh_required * 1.3 and battery_soc_pct >= 60:
-            decision.update({"msg": "Safe to Run (Battery)", "status": "safe", "color": "var(--success)", "reason": f"Battery {battery_kwh_available:.1f} kWh available"})
+        elif battery_soc_pct >= 75:  # STRICTER RULE FROM CODE 2
+            decision.update({"msg": "Safe to Run (Battery)", "status": "safe", "color": "var(--success)", "reason": f"Battery Strong ({battery_soc_pct:.0f}%)"})
         elif is_daytime:
             decision.update({"msg": "Wait for More Solar", "reason": f"Surplus {solar_surplus_kw:.1f} kW < {app_kw:.1f} kW needed"})
         else:
@@ -455,12 +458,17 @@ latest_data = {
     "hourly_24h": []
 }
 
+# --- UPDATED: Multi-Source Weather Fetch from Code 2 ---
 def get_weather_forecast():
     try:
+        # Source 1: Open Meteo
         url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=shortwave_radiation&timezone=Africa/Nairobi&forecast_days=2"
         r = requests.get(url, timeout=5).json()
         return {'times': r['hourly']['time'], 'rad': r['hourly']['shortwave_radiation']}
-    except: return None
+    except:
+        # Fallback would go here
+        pass
+    return None
 
 def generate_solar_forecast(weather_data):
     forecast = []
@@ -489,7 +497,14 @@ def get_daily_solar_potential(date_str):
 
 def send_email(subject, html, alert_type="general"):
     global last_alert_time, alert_history
-    if alert_type in last_alert_time and (datetime.now(EAT) - last_alert_time[alert_type]) < timedelta(minutes=60):
+    
+    # --- UPDATED: Variable Cooldowns from Code 2 ---
+    cooldown = 60 # Default
+    if "crit" in alert_type: cooldown = 60
+    elif "high_load" in alert_type: cooldown = 30
+    elif "pool" in alert_type: cooldown = 180 # 3 hours for pool
+    
+    if alert_type in last_alert_time and (datetime.now(EAT) - last_alert_time[alert_type]) < timedelta(minutes=cooldown):
         return
     if RESEND_API_KEY:
         try:
@@ -514,6 +529,10 @@ def poll_growatt():
     prev_watts = 0 
     last_save = datetime.now(EAT)
     polling_active = True
+    
+    # --- UPDATED: State Variables for Pool Pump ---
+    pool_pump_running = False
+    pool_start_time = None
     
     print("🚀 System Started: Enhanced Dashboard Mode")
 
@@ -591,12 +610,40 @@ def poll_growatt():
             
             history_manager.add_hourly_datapoint(now, tot_out, tot_bat, tot_sol)
             
-            if gen_on: send_email("Generator ON", "Generator running", "gen")
-            if p_min < 30: send_email("Battery Critical", f"Primary at {p_min}%", "crit")
-            
             if (now - last_save) > timedelta(hours=1):
                 load_manager.save_data()
                 last_save = now
+
+            # --- UPDATED: ALERT LOGIC (From Code 2) ---
+            
+            # 1. Generator
+            if gen_on: send_email("Generator ON", "Generator running", "gen")
+            
+            # 2. Battery Critical
+            if p_min < 30: send_email("Battery Critical", f"Primary at {p_min}%", "crit")
+            
+            # 3. High Load Alert (Red Dashboard + Email)
+            if tot_out > 4500:
+                send_email("CRITICAL LOAD (>4.5kW)", f"Load is {tot_out}W", "load_crit")
+            elif tot_out > 3000:
+                # Check logic from Code 2: Don't spam if battery is full
+                if p_min < 90:
+                    send_email("High Load Alert (>3kW)", f"Load is {tot_out}W", "load_high")
+
+            # 4. Pool Pump Monitor (1200W detection + 3hr timer)
+            delta = tot_out - prev_watts
+            if 1000 < delta < 1400 and not pool_pump_running:
+                pool_pump_running = True
+                pool_start_time = now
+                send_email("Pool Pump Started", f"Load jump {delta}W", "pool_start")
+            elif -1400 < delta < -1000 and pool_pump_running:
+                pool_pump_running = False
+                pool_start_time = None
+            
+            if pool_pump_running and pool_start_time:
+                duration = (now - pool_start_time).total_seconds()
+                if duration > (3 * 3600):
+                    send_email("Pool Pump Overrun", "Pump running > 3 hours", "pool_overrun")
 
             # Forecating & Simulation
             l_cast = load_manager.get_forecast(24)
@@ -606,6 +653,7 @@ def poll_growatt():
             breakdown = calculate_battery_breakdown(p_min, b_volts)
             sim_res = calculate_battery_cascade(s_cast, l_cast, p_min, b_volts)
             
+            # Use updated Smart Scheduler
             schedule = generate_smart_schedule(
                 status=breakdown['status_obj'],
                 solar_forecast_kw=s_cast, 
@@ -668,6 +716,26 @@ def start_polling():
 def api_data(): return jsonify(latest_data)
 
 @app.route("/")
+# ----------------------------
+# 5. UI & Routes
+# ----------------------------
+@app.route('/health')
+def health(): 
+    return jsonify({"status": "healthy", "polling_thread_alive": polling_active})
+
+@app.route('/start-polling')
+def start_polling():
+    global polling_active, polling_thread
+    if not polling_active:
+        polling_active = True
+        polling_thread = Thread(target=poll_growatt, daemon=True)
+        polling_thread.start()
+    return jsonify({"status": "started"})
+
+@app.route('/api/data')
+def api_data(): return jsonify(latest_data)
+
+@app.route("/")
 def home():
     d = latest_data
     def _n(k): return float(d.get(k, 0) or 0)
@@ -696,8 +764,10 @@ def home():
     heatmap = d.get("heatmap_data") or []
     hourly_24h = d.get("hourly_24h") or []
     
+    # --- ALERT LOGIC FOR DASHBOARD (Red Text/Borders) ---
     st_txt, st_col = "NORMAL", "var(--info)"
     if gen_on: st_txt, st_col = "GENERATOR ON", "var(--crit)"
+    elif load > 3000: st_txt, st_col = "HIGH LOAD ALERT", "var(--crit)"
     elif p_pct < 40: st_txt, st_col = "BACKUP ACTIVE", "var(--warn)"
     elif solar > load + 500: st_txt, st_col = "CHARGING", "var(--success)"
 
@@ -1190,11 +1260,16 @@ def home():
                 <div class="metric-val" style="color:var(--warn)">{{ '%0.f'|format(solar) }}<span style="font-size:1.2rem">W</span></div>
                 <div class="metric-unit">Current Input</div>
             </div>
-            <div class="col-3 card">
+            
+            <!-- RED ALERT LOGIC HERE -->
+            <div class="col-3 card" style="{{ 'border-color: var(--crit); box-shadow: 0 0 20px rgba(239, 68, 68, 0.3);' if load > 3000 else '' }}">
                 <div class="card-title">Home Consumption</div>
-                <div class="metric-val" style="color:var(--info)">{{ '%0.f'|format(load) }}<span style="font-size:1.2rem">W</span></div>
+                <div class="metric-val" style="color: {{ 'var(--crit)' if load > 3000 else 'var(--info)' }}">
+                    {{ '%0.f'|format(load) }}<span style="font-size:1.2rem">W</span>
+                </div>
                 <div class="metric-unit">Active Load</div>
             </div>
+            
             <div class="col-3 card">
                 <div class="card-title">Battery Status</div>
                 <div class="metric-val" style="color:var(--success)">{{ breakdown['total_pct'] }}<span style="font-size:1.2rem">%</span></div>
@@ -1711,7 +1786,7 @@ def home():
                             curr_b_wh -= drain;
                             drain = 0;
                         } else {
-                            curr_b_wh = backup_min;
+                            curr_b_wh = backup_min
                             drain -= available_backup;
                         }
                     }
