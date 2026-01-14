@@ -1537,13 +1537,20 @@ def home():
                 return;
             }
 
-            // Simplified JS Physics matching Python tiered logic
+            // Full tiered discharge simulation matching Python
             const P_TOTAL = 30000;
-            const B_TOTAL = 21000 * 0.7;
-            const TOTAL_CAPACITY = (P_TOTAL * 0.60) + (B_TOTAL * 0.80) + (P_TOTAL * 0.20);
+            const B_TOTAL = 21000 * 0.7;  // 14,700
+            const TOTAL_CAPACITY = (P_TOTAL * 0.60) + (B_TOTAL * 0.80) + (P_TOTAL * 0.20); // 35,760
             
+            // Get current battery state from first data point
             let currentPct = baseData[0] || 0;
-            let currentWh = (currentPct / 100) * TOTAL_CAPACITY;
+            let currentTotalWh = (currentPct / 100) * TOTAL_CAPACITY;
+            
+            // Reconstruct primary and backup levels from current percentage
+            // This is approximate - ideally we'd get actual P and B levels from backend
+            let curr_p_wh = {{ p_pct }} / 100.0 * P_TOTAL;
+            let curr_b_wh = {{ backup_pct }} / 100.0 * B_TOTAL;
+            
             let simCurve = [];
             
             for(let i = 0; i < labels.length; i++) {
@@ -1551,13 +1558,66 @@ def home():
                 let sol = (sForecast[i] ? sForecast[i].estimated_generation : 0);
                 let net = sol - (baseL + totalSimWatts);
                 
-                if(net > 0) {
-                    currentWh = Math.min(TOTAL_CAPACITY, currentWh + net);
-                } else {
-                    currentWh = Math.max(0, currentWh - Math.abs(net));
+                if(net > 0) {  // Charging
+                    let space_in_primary = P_TOTAL - curr_p_wh;
+                    if (net <= space_in_primary) {
+                        curr_p_wh += net;
+                    } else {
+                        curr_p_wh = P_TOTAL;
+                        let overflow = net - space_in_primary;
+                        curr_b_wh = Math.min(B_TOTAL, curr_b_wh + overflow);
+                    }
+                } else {  // Discharging
+                    let drain = Math.abs(net);
+                    
+                    // Tier 1: Primary 100% -> 40%
+                    let primary_min = P_TOTAL * 0.40;
+                    let available_tier1 = Math.max(0, curr_p_wh - primary_min);
+                    
+                    if (available_tier1 >= drain) {
+                        curr_p_wh -= drain;
+                        drain = 0;
+                    } else {
+                        curr_p_wh = primary_min;
+                        drain -= available_tier1;
+                    }
+                    
+                    // Tier 2: Backup if drain remains
+                    if (drain > 0) {
+                        let backup_min = B_TOTAL * 0.20;
+                        let available_backup = Math.max(0, curr_b_wh - backup_min);
+                        
+                        if (available_backup >= drain) {
+                            curr_b_wh -= drain;
+                            drain = 0;
+                        } else {
+                            curr_b_wh = backup_min;
+                            drain -= available_backup;
+                        }
+                    }
+                    
+                    // Tier 3: Emergency primary (40% -> 20%)
+                    if (drain > 0) {
+                        let emergency_min = P_TOTAL * 0.20;
+                        let available_emergency = Math.max(0, curr_p_wh - emergency_min);
+                        
+                        if (available_emergency >= drain) {
+                            curr_p_wh -= drain;
+                        } else {
+                            curr_p_wh = emergency_min;
+                        }
+                    }
                 }
                 
-                simCurve.push((currentWh / TOTAL_CAPACITY) * 100);
+                // Calculate total available matching dashboard display
+                let primary_tier1_avail = Math.max(0, curr_p_wh - (P_TOTAL * 0.40));
+                let backup_avail = Math.max(0, curr_b_wh - (B_TOTAL * 0.20));
+                let emergency_avail = Math.max(0, Math.min(curr_p_wh, P_TOTAL * 0.40) - (P_TOTAL * 0.20));
+                
+                let total_available = primary_tier1_avail + backup_avail + emergency_avail;
+                let percentage = (total_available / TOTAL_CAPACITY) * 100;
+                
+                simCurve.push(percentage);
             }
             
             chart.data.datasets[1].data = simCurve;
