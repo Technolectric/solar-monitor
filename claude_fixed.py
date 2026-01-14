@@ -918,7 +918,7 @@ def home():
         recommendation_items.append({
             'icon': '✅',
             'title': 'SAFE TO USE HEAVY LOADS',
-            'description': f'Primary battery: {p_pct:.0f}% (>75%) | Surplus: {surplus_power:.0f}W',
+            'description': f'Primary battery: {p_pct:.0f}% | Surplus: {surplus_power:.0f}W',
             'class': 'good'
         })
         heavy_loads_safe = True
@@ -941,7 +941,7 @@ def home():
         recommendation_items.append({
             'icon': '⚠️',
             'title': 'LIMIT HEAVY LOADS',
-            'description': f'Primary battery {p_pct:.0f}% (≤75%) - use moderate loads only',
+            'description': f'Primary battery {p_pct:.0f}% - use moderate loads only',
             'class': 'warning'
         })
     else:
