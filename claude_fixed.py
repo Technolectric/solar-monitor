@@ -187,7 +187,6 @@ def identify_active_appliances(current, previous, gen_active, backup_volts, prim
 APPLIANCE_PROFILES = [
     {"id": "pool", "name": "Pool Pump", "watts": 1200, "hours": 4, "icon": "🏊"},
     {"id": "wash", "name": "Washer", "watts": 800, "hours": 1.5, "icon": "🧺"},
-    {"id": "dish", "name": "Dishwasher", "watts": 1500, "hours": 2, "icon": "🍽️"},
     {"id": "oven", "name": "Oven", "watts": 2500, "hours": 1.5, "icon": "🍳"}
 ]
 
@@ -261,9 +260,6 @@ def calculate_battery_breakdown(p_pct, b_volts):
     # Current total available
     total_available = primary_tier1_available + backup_available + emergency_available
     
-    # Empty space
-    empty_space = max(0, total_system_capacity - total_available)
-    
     # Overall percentage
     total_pct = (total_available / total_system_capacity * 100) if total_system_capacity > 0 else 0
     
@@ -271,14 +267,13 @@ def calculate_battery_breakdown(p_pct, b_volts):
         'chart_data': [
             round(primary_tier1_available / 1000, 1),  # Primary Tier 1
             round(backup_available / 1000, 1),          # Backup
-            round(emergency_available / 1000, 1),       # Emergency Primary
-            round(empty_space / 1000, 1)                # Empty
+            round(emergency_available / 1000, 1)        # Reserve
         ],
-        'tier_labels': ['Primary (100-40%)', 'Backup (80-20%)', 'Emergency (40-20%)', 'Empty'],
+        'tier_labels': ['Primary (100-40%)', 'Backup (80-20%)', 'Reserve (40-20%)'],
         'total_pct': round(total_pct, 1),
         'total_kwh': round(total_available / 1000, 1),
         'primary_pct': p_pct,
-        'backup_voltage': b_volts,
+        'backup_voltage': round(b_volts, 1),  # Format to 1 decimal
         'backup_pct': round(b_pct, 1)
     }
 
@@ -377,7 +372,7 @@ latest_data = {
     "generator_running": False, "inverters": [], "detected_appliances": [], 
     "solar_forecast": [], "load_forecast": [], 
     "battery_sim": {"labels": [], "data": []},
-    "energy_breakdown": {"chart_data": [1, 0, 1, 1], "total_pct": 0, "total_kwh": 0},
+    "energy_breakdown": {"chart_data": [1, 0, 1], "total_pct": 0, "total_kwh": 0},
     "scheduler": [],
     "heatmap_data": [],
     "hourly_24h": []
@@ -571,8 +566,8 @@ def home():
     detected = d.get("detected_appliances", [])
     
     breakdown = d.get("energy_breakdown") or {
-        "chart_data": [1,0,1,1], 
-        "tier_labels": ['Primary (100-40%)', 'Backup (80-20%)', 'Emergency (40-20%)', 'Empty'],
+        "chart_data": [1,0,1], 
+        "tier_labels": ['Primary (100-40%)', 'Backup (80-20%)', 'Reserve (40-20%)'],
         "total_pct": 0, 
         "total_kwh": 0,
         "primary_pct": 0,
@@ -598,7 +593,7 @@ def home():
     c_load = [x['estimated_load'] for x in l_fc] if l_fc else []
     c_solar = [x['estimated_generation'] for x in s_fc[:len(l_fc)]] if s_fc else []
     alerts = alert_history[:8]
-    tier_labels = breakdown.get('tier_labels', ['Primary (100-40%)', 'Backup (80-20%)', 'Emergency (40-20%)', 'Empty'])
+    tier_labels = breakdown.get('tier_labels', ['Primary (100-40%)', 'Backup (80-20%)', 'Reserve (40-20%)'])
     primary_pct = breakdown.get('primary_pct', 0)
     backup_voltage = breakdown.get('backup_voltage', 0)
     backup_pct = breakdown.get('backup_pct', 0)
@@ -1323,7 +1318,7 @@ def home():
             }
         });
 
-        // --- 2. Storage Pie Chart (4 Tiers) ---
+        // --- 2. Storage Pie Chart (3 Tiers) ---
         new Chart(document.getElementById('pieChart'), {
             type: 'doughnut',
             data: {
@@ -1331,10 +1326,9 @@ def home():
                 datasets: [{
                     data: pieData,
                     backgroundColor: [
-                        'rgba(16, 185, 129, 0.9)',   // Primary Tier 1 (green)
+                        'rgba(16, 185, 129, 0.9)',   // Primary (green)
                         'rgba(59, 130, 246, 0.8)',    // Backup (blue)
-                        'rgba(245, 158, 11, 0.8)',    // Emergency (orange)
-                        'rgba(100, 116, 139, 0.3)'    // Empty (grey)
+                        'rgba(245, 158, 11, 0.8)'     // Reserve (orange)
                     ],
                     borderWidth: 0,
                     borderRadius: 4,
