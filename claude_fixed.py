@@ -2,19 +2,11 @@ import os
 import time
 import requests
 import json
-import csv
-import numpy as np
-import pandas as pd
 from datetime import datetime, timedelta, timezone
 from threading import Thread
 from flask import Flask, render_template_string, request, jsonify
+from collections import deque
 from pathlib import Path
-
-# ML Imports
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.cluster import KMeans
-import warnings
-warnings.filterwarnings('ignore') # Silence sklearn warnings for clean logs
 
 # ----------------------------
 # Flask App & Config
@@ -28,13 +20,12 @@ SERIAL_NUMBERS = os.getenv("SERIAL_NUMBERS", "").split(",")
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
 DATA_FILE = "load_patterns.json"
 HISTORY_FILE = "daily_history.json"
-TRAINING_FILE = "training_data.csv"
 
 # Inverter Mapping
 INVERTER_CONFIG = {
-    "RKG3B0400T": {"label": "Inverter 1", "type": "primary"},
-    "KAM4N5W0AG": {"label": "Inverter 2", "type": "primary"},
-    "JNK1CDR0KQ": {"label": "Inverter 3 (Backup)", "type": "backup"}
+"RKG3B0400T": {"label": "Inverter 1", "type": "primary"},
+"KAM4N5W0AG": {"label": "Inverter 2", "type": "primary"},
+"JNK1CDR0KQ": {"label": "Inverter 3 (Backup)", "type": "backup"}
 }
 
 # System Physics Constants
@@ -53,91 +44,13 @@ SENDER_EMAIL = os.getenv('SENDER_EMAIL')
 RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL')
 
 # ----------------------------
-# 1. AI Engine: Smart Load Detector
-# ----------------------------
-class SmartLoadDetector:
-    def __init__(self, training_file):
-        self.filename = training_file
-        self.model = None
-        self.cluster_names = {}
-        self.ensure_file_exists()
-        self.train_model()
-
-    def ensure_file_exists(self):
-        if not Path(self.filename).exists():
-            with open(self.filename, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(['timestamp', 'hour', 'day_of_week', 'watts'])
-
-    def log_data(self, watts):
-        """Logs a data point for future training"""
-        now = datetime.now(EAT)
-        with open(self.filename, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([now.isoformat(), now.hour, now.weekday(), watts])
-
-    def train_model(self):
-        """
-        Uses K-Means clustering to find distinct 'Load States' from history,
-        then maps them to human-readable names based on wattage.
-        """
-        try:
-            df = pd.read_csv(self.filename)
-            if len(df) < 50: # Need some data to start learning
-                print("AI: Not enough data to train yet (<50 points).")
-                return
-
-            # Prepare data: We cluster based on Watts primarily
-            X = df[['watts']].values
-            
-            # K-Means Clustering: Find 5 distinct usage levels
-            kmeans = KMeans(n_clusters=5, random_state=42)
-            df['cluster'] = kmeans.fit_predict(X)
-            
-            # Analyze clusters to name them (Heuristics for 2 houses)
-            cluster_centers = kmeans.cluster_centers_.flatten()
-            
-            # Map clusters to names based on their center Wattage
-            for cluster_id, center_watts in enumerate(cluster_centers):
-                name = "Unknown"
-                if center_watts < 600: name = "Idle / Base Load (Both Houses)"
-                elif 600 <= center_watts < 1500: name = "Moderate (TVs/Lights/Computers)"
-                elif 1500 <= center_watts < 3000: name = "High (Cooking/Pumps - Single House)"
-                elif 3000 <= center_watts < 5000: name = "Very High (Cooking/AC - Both Houses)"
-                else: name = "Peak Load (Limit Exceeded)"
-                
-                self.cluster_names[cluster_id] = f"{name} (~{int(center_watts)}W)"
-
-            # Train a Classifier to predict the Cluster ID based on Wattage AND Time
-            # This helps the AI learn "At 6PM, 2000W is likely cooking" vs "At 2AM 2000W is weird"
-            self.model = RandomForestClassifier(n_estimators=50)
-            self.model.fit(df[['watts', 'hour', 'day_of_week']], df['cluster'])
-            print("AI: Model trained successfully on historical patterns.")
-
-        except Exception as e:
-            print(f"AI Training Error: {e}")
-
-    def predict_load(self, watts):
-        """Returns the AI's classification of the current load"""
-        if self.model is None:
-            # Fallback if no model yet
-            if watts < 600: return "Collecting Data (Idle)"
-            if watts < 2000: return "Collecting Data (Moderate)"
-            return "Collecting Data (High)"
-            
-        now = datetime.now(EAT)
-        # Predict the cluster based on current watts + time context
-        cluster_pred = self.model.predict([[watts, now.hour, now.weekday()]])[0]
-        return self.cluster_names.get(cluster_pred, "Unknown Load")
-
-# ----------------------------
-# 2. Logic Engine: Persistence & Detection
+# 1. Logic Engine: Persistence & Detection
 # ----------------------------
 class PersistentLoadManager:
     def __init__(self, filename):
         self.filename = filename
         self.patterns = self.load_data()
-        
+
     def load_data(self):
         if Path(self.filename).exists():
             try:
@@ -159,7 +72,7 @@ class PersistentLoadManager:
         self.patterns[day_type][hour].append(load_watts)
         if len(self.patterns[day_type][hour]) > 100:
             self.patterns[day_type][hour] = self.patterns[day_type][hour][-100:]
-            
+
     def get_forecast(self, hours_ahead=24):
         forecast = []
         now = datetime.now(EAT)
@@ -177,7 +90,7 @@ class DailyHistoryManager:
         self.filename = filename
         self.history = self.load_history()
         self.hourly_data = []  
-        
+
     def load_history(self):
         if Path(self.filename).exists():
             try:
@@ -185,13 +98,13 @@ class DailyHistoryManager:
                     return json.load(f)
             except: pass
         return {}
-    
+
     def save_history(self):
         try:
             with open(self.filename, 'w') as f:
                 json.dump(self.history, f)
         except: pass
-    
+
     def add_hourly_datapoint(self, timestamp, load_w, battery_discharge_w, solar_w):
         self.hourly_data.append({
             'timestamp': timestamp.isoformat(),
@@ -201,10 +114,10 @@ class DailyHistoryManager:
         })
         if len(self.hourly_data) > 288:
             self.hourly_data = self.hourly_data[-288:]
-    
+
     def get_last_24h_data(self):
         return self.hourly_data
-    
+
     def update_daily(self, date_str, total_consumption_wh, total_solar_wh, max_solar_potential_wh):
         if date_str not in self.history:
             self.history[date_str] = {
@@ -214,13 +127,12 @@ class DailyHistoryManager:
             }
         self.history[date_str]['consumption'] = total_consumption_wh
         self.history[date_str]['solar'] = total_solar_wh
-        self.history[date_str]['potential'] = max_solar_potential_wh
-        
+
         dates = sorted(self.history.keys())
         if len(dates) > 30:
             for old_date in dates[:-30]:
                 del self.history[old_date]
-    
+
     def get_last_30_days(self):
         now = datetime.now(EAT)
         result = []
@@ -228,11 +140,11 @@ class DailyHistoryManager:
             date = now - timedelta(days=i)
             date_str = date.strftime('%Y-%m-%d')
             data = self.history.get(date_str, {'consumption': 0, 'solar': 0, 'potential': 0})
-            
+
             efficiency = 0
             if data['potential'] > 0:
                 efficiency = min(100, (data['solar'] / data['potential']) * 100)
-            
+
             result.append({
                 'date': date_str,
                 'day': date.day,
@@ -246,18 +158,35 @@ class DailyHistoryManager:
 
 load_manager = PersistentLoadManager(DATA_FILE)
 history_manager = DailyHistoryManager(HISTORY_FILE)
-# Initialize the AI Engine
-ai_detector = SmartLoadDetector(TRAINING_FILE)
 
 def identify_active_appliances(current, previous, gen_active, backup_volts, primary_pct):
+    """
+    CRITICAL: Detects if generator is running manually for water heating.
+    This prevents false alerts when generator is intentionally on.
+    """
     detected = []
     delta = current - previous
-    if gen_active:
-        if primary_pct > 42: detected.append("Water Heating")
-        else: detected.append("System Charging")
     
-    # Heuristics still useful for specific transient events
-    if delta > 1500: detected.append("High Power On (Kettle/Pump)")
+    # CRITICAL: Manual generator detection
+    if gen_active:
+        # If primary battery is charging (>42%) while generator runs = manual water heating
+        if primary_pct > 42: 
+            detected.append("Water Heating")
+        else: 
+            detected.append("System Charging")
+    
+    # Normal appliance detection
+    if current < 400: 
+        detected.append("Idle")
+    elif 1000 <= current <= 1350: 
+        detected.append("Pool Pump")
+    elif current > 1800: 
+        detected.append("Cooking")
+    elif 400 <= current < 1000: 
+        detected.append("TV/Lights")
+    
+    if delta > 1500: 
+        detected.append("Kettle")
     
     return detected
 
@@ -271,27 +200,34 @@ APPLIANCE_PROFILES = [
     {"id": "oven", "name": "Oven", "watts": 2500, "hours": 1.5, "icon": "🍳", "priority": "high"}
 ]
 
-# --- UPDATED: Using "Usable Energy" Logic from Code 2 ---
 def get_energy_status(p_pct, b_volts):
+    """
+    Centralized physics engine to calculate system state.
+    Used by both current status (donut) and simulation (forecast).
+    """
     p_total_wh = PRIMARY_BATTERY_CAPACITY_WH
     b_total_wh = BACKUP_BATTERY_DEGRADED_WH * BACKUP_DEGRADATION
-    
+
+    # Calculate current Wh
     curr_p_wh = (p_pct / 100.0) * p_total_wh
     b_pct = max(0, min(100, (b_volts - 51.0) / 2.0 * 100))
     curr_b_wh = (b_pct / 100.0) * b_total_wh
-    
+
+    # Calculate Capacities (Tiers)
     primary_tier1_capacity = p_total_wh * 0.60
     backup_capacity = b_total_wh * 0.80
     emergency_capacity = p_total_wh * 0.20
     total_system_capacity = primary_tier1_capacity + backup_capacity + emergency_capacity
-    
+
+    # Calculate Available Energy (Tiers)
     primary_tier1_available = max(0, curr_p_wh - (p_total_wh * 0.40))
     backup_available = max(0, curr_b_wh - (b_total_wh * 0.20))
     emergency_available = max(0, min(curr_p_wh, p_total_wh * 0.40) - (p_total_wh * 0.20))
-    
+
     total_available = primary_tier1_available + backup_available + emergency_available
     total_pct = (total_available / total_system_capacity * 100) if total_system_capacity > 0 else 0
-    
+
+    # Determine Active Tier
     if primary_tier1_available > 0: active_tier = 'primary'
     elif backup_available > 0: active_tier = 'backup'
     elif emergency_available > 0: active_tier = 'reserve'
@@ -307,10 +243,10 @@ def get_energy_status(p_pct, b_volts):
         'active_tier': active_tier
     }
 
-# --- UPDATED: Using "Code 2" Smart Scheduler Logic ---
 def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now_hour=None):
+    """Smart appliance scheduler."""
     battery_kwh_available = status['total_available_wh'] / 1000
-    battery_soc_pct = status['total_pct']
+    battery_soc_pct = status['total_pct']  # Use total system availability
 
     current_solar_kw = solar_forecast_kw
     if isinstance(solar_forecast_kw, list) and len(solar_forecast_kw) > 0:
@@ -327,20 +263,19 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
     advice = []
     solar_surplus_kw = max(current_solar_kw - current_load_kw, 0)
     is_daytime = now_hour is None or (7 <= now_hour <= 18)
-    
+
     for app in APPLIANCE_PROFILES:
         app_kw = app["watts"] / 1000
         app_kwh_required = (app["watts"] * app["hours"]) / 1000
 
         decision = {"msg": "Wait", "status": "unsafe", "color": "var(--warn)", "reason": ""}
 
-        # Code 2 Logic: Only recommend battery use if > 75%
         if battery_soc_pct < 40:
             decision.update({"msg": "Battery Too Low", "reason": f"System at {battery_soc_pct:.0f}%"})
         elif solar_surplus_kw >= app_kw and is_daytime:
             decision.update({"msg": "Safe to Run (Solar)", "status": "safe", "color": "var(--success)", "reason": f"Solar surplus {solar_surplus_kw:.1f} kW"})
-        elif battery_soc_pct >= 75:  # STRICTER RULE FROM CODE 2
-            decision.update({"msg": "Safe to Run (Battery)", "status": "safe", "color": "var(--success)", "reason": f"Battery Strong ({battery_soc_pct:.0f}%)"})
+        elif battery_kwh_available >= app_kwh_required * 1.3 and battery_soc_pct >= 60:
+            decision.update({"msg": "Safe to Run (Battery)", "status": "safe", "color": "var(--success)", "reason": f"Battery {battery_kwh_available:.1f} kWh available"})
         elif is_daytime:
             decision.update({"msg": "Wait for More Solar", "reason": f"Surplus {solar_surplus_kw:.1f} kW < {app_kw:.1f} kW needed"})
         else:
@@ -351,7 +286,9 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
     return advice
 
 def calculate_battery_breakdown(p_pct, b_volts):
+    """Calculates breakdown for circular chart using centralized logic."""
     status = get_energy_status(p_pct, b_volts)
+
     return {
         'chart_data': [round(x / 1000, 1) for x in status['breakdown_wh']],
         'tier_labels': ['Primary', 'Backup', 'Reserve'],
@@ -360,27 +297,38 @@ def calculate_battery_breakdown(p_pct, b_volts):
         'primary_pct': p_pct,
         'backup_voltage': round(b_volts, 1),
         'backup_pct': round(status['b_pct'], 1),
-        'status_obj': status
+        'status_obj': status # For internal use
     }
 
 def calculate_battery_cascade(solar, load, p_pct, b_volts):
+    """
+    Simulates battery levels. 
+    CRITICAL: Anchors the first data point to current breakdown state.
+    """
     if not solar or not load: return {'labels': [], 'data': [], 'tiers': []}
+
+    # 1. Initialize logic with current state
     start_status = get_energy_status(p_pct, b_volts)
+
     curr_p_wh = start_status['curr_p_wh']
     curr_b_wh = start_status['curr_b_wh']
-    
+
+    # Constants
     p_total_wh = PRIMARY_BATTERY_CAPACITY_WH
     b_total_wh = BACKUP_BATTERY_DEGRADED_WH * BACKUP_DEGRADATION
-    
+
+    # 2. Set Start Points (Time 0)
     sim_data = [start_status['total_pct']]
-    sim_labels = ["Now"]
+    sim_labels = ["Now"] # Corresponds to current state
     tier_info = [start_status['active_tier']]
-    
+
+    # 3. Simulate future steps
     count = min(len(solar), len(load))
-    
+
     for i in range(count):
         net = solar[i]['estimated_generation'] - load[i]['estimated_load']
-        
+
+        # Apply physics
         if net > 0:
             space_in_primary = p_total_wh - curr_p_wh
             if net <= space_in_primary:
@@ -391,52 +339,60 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts):
                 curr_b_wh = min(b_total_wh, curr_b_wh + overflow)
         else:
             drain = abs(net)
+            # Tier 1 Drain
             primary_min = p_total_wh * 0.40
             available_tier1 = max(0, curr_p_wh - primary_min)
-            
+
             if available_tier1 >= drain:
                 curr_p_wh -= drain
                 drain = 0
             else:
                 curr_p_wh = primary_min
                 drain -= available_tier1
-            
+
+            # Tier 2 Drain
             if drain > 0:
                 backup_min = b_total_wh * 0.20
                 available_backup = max(0, curr_b_wh - backup_min)
-                
+
                 if available_backup >= drain:
                     curr_b_wh -= drain
                     drain = 0
                 else:
                     curr_b_wh = backup_min
                     drain -= available_backup
-            
+
+            # Tier 3 Drain
             if drain > 0:
                 emergency_min = p_total_wh * 0.20
                 available_emergency = max(0, curr_p_wh - emergency_min)
-                
+
                 if available_emergency >= drain:
                     curr_p_wh -= drain
                 else:
                     curr_p_wh = emergency_min
-        
+
+        # Calculate resulting state percentage
         primary_tier1_avail = max(0, curr_p_wh - (p_total_wh * 0.40))
         backup_avail = max(0, curr_b_wh - (b_total_wh * 0.20))
         emergency_avail = max(0, min(curr_p_wh, p_total_wh * 0.40) - (p_total_wh * 0.20))
+
         total_capacity = (p_total_wh * 0.60) + (b_total_wh * 0.80) + (p_total_wh * 0.20)
         total_available = primary_tier1_avail + backup_avail + emergency_avail
+
         percentage = (total_available / total_capacity) * 100 if total_capacity > 0 else 0
-        
+
+        # Determine active tier
         if primary_tier1_avail > 0: active_tier = 'primary'
         elif backup_avail > 0: active_tier = 'backup'
         elif emergency_avail > 0: active_tier = 'reserve'
         else: active_tier = 'empty'
-        
+
+        # Add point
         sim_data.append(percentage)
         sim_labels.append(solar[i]['time'].strftime('%H:%M'))
         tier_info.append(active_tier)
-    
+
     return {'labels': sim_labels, 'data': sim_data, 'tiers': tier_info}
 
 # ----------------------------
@@ -449,7 +405,6 @@ latest_data = {
     "timestamp": "Initializing...", "total_output_power": 0, "total_solar_input_W": 0,
     "primary_battery_min": 0, "backup_battery_voltage": 0, "backup_active": False,
     "generator_running": False, "inverters": [], "detected_appliances": [], 
-    "ai_load_analysis": "Gathering Data...",
     "solar_forecast": [], "load_forecast": [], 
     "battery_sim": {"labels": [], "data": [], "tiers": []},
     "energy_breakdown": {"chart_data": [1, 0, 1], "total_pct": 0, "total_kwh": 0},
@@ -458,17 +413,12 @@ latest_data = {
     "hourly_24h": []
 }
 
-# --- UPDATED: Multi-Source Weather Fetch from Code 2 ---
 def get_weather_forecast():
     try:
-        # Source 1: Open Meteo
         url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=shortwave_radiation&timezone=Africa/Nairobi&forecast_days=2"
         r = requests.get(url, timeout=5).json()
         return {'times': r['hourly']['time'], 'rad': r['hourly']['shortwave_radiation']}
-    except:
-        # Fallback would go here
-        pass
-    return None
+    except: return None
 
 def generate_solar_forecast(weather_data):
     forecast = []
@@ -483,33 +433,43 @@ def generate_solar_forecast(weather_data):
         forecast.append({'time': ft, 'estimated_generation': est})
     return forecast
 
-def get_daily_solar_potential(date_str):
-    try:
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=shortwave_radiation&timezone=Africa/Nairobi&start_date={date_str}&end_date={date_str}"
-        r = requests.get(url, timeout=10).json()
-        if 'hourly' in r and 'shortwave_radiation' in r['hourly']:
-            total_rad_wh_m2 = sum([val for val in r['hourly']['shortwave_radiation'] if val is not None])
-            theoretical_wh = (total_rad_wh_m2 / 1000.0) * (TOTAL_SOLAR_CAPACITY_KW * 1000) * SOLAR_EFFICIENCY_FACTOR
-            return theoretical_wh
-    except Exception as e:
-        print(f"Error fetching historical weather for {date_str}: {e}")
-    return TOTAL_SOLAR_CAPACITY_KW * 1000 * 10
-
-def send_email(subject, html, alert_type="general"):
+def send_email(subject, html, alert_type="general", send_via_email=True):
+    """
+    IMPROVED: Now includes send_via_email parameter to prevent email spam
+    during manual generator operation or backup mode.
+    """
     global last_alert_time, alert_history
     
-    # --- UPDATED: Variable Cooldowns from Code 2 ---
-    cooldown = 60 # Default
-    if "crit" in alert_type: cooldown = 60
-    elif "high_load" in alert_type: cooldown = 30
-    elif "pool" in alert_type: cooldown = 180 # 3 hours for pool
+    # Cooldown logic - different times for different alert severities
+    cooldown_minutes = 120  # Default 2 hours
+    if "critical" in alert_type.lower(): 
+        cooldown_minutes = 60  # 1 hour for critical
+    elif "high_load" in alert_type.lower(): 
+        cooldown_minutes = 30  # 30 min for high load
     
-    if alert_type in last_alert_time and (datetime.now(EAT) - last_alert_time[alert_type]) < timedelta(minutes=cooldown):
-        return
-    if RESEND_API_KEY:
+    # Check cooldown
+    if alert_type in last_alert_time:
+        time_since = datetime.now(EAT) - last_alert_time[alert_type]
+        if time_since < timedelta(minutes=cooldown_minutes):
+            return  # Skip this alert
+    
+    # Send email only if requested
+    if send_via_email and RESEND_API_KEY:
         try:
-            requests.post("https://api.resend.com/emails", headers={"Authorization": f"Bearer {RESEND_API_KEY}"}, json={"from": SENDER_EMAIL, "to": [RECIPIENT_EMAIL], "subject": subject, "html": html})
-        except: pass
+            requests.post(
+                "https://api.resend.com/emails", 
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}"}, 
+                json={
+                    "from": SENDER_EMAIL, 
+                    "to": [RECIPIENT_EMAIL], 
+                    "subject": subject, 
+                    "html": html
+                }
+            )
+        except: 
+            pass
+    
+    # Always log the alert
     now = datetime.now(EAT)
     last_alert_time[alert_type] = now
     alert_history.insert(0, {"timestamp": now, "type": alert_type, "subject": subject})
@@ -529,11 +489,7 @@ def poll_growatt():
     prev_watts = 0 
     last_save = datetime.now(EAT)
     polling_active = True
-    
-    # --- UPDATED: State Variables for Pool Pump ---
-    pool_pump_running = False
-    pool_start_time = None
-    
+
     print("🚀 System Started: Enhanced Dashboard Mode")
 
     while polling_active:
@@ -542,7 +498,7 @@ def poll_growatt():
             tot_out, tot_sol, tot_bat = 0, 0, 0
             inv_data, p_caps = [], []
             b_data, gen_on = None, False
-            
+
             for sn in SERIAL_NUMBERS:
                 try:
                     r = requests.post(API_URL, data={"storage_sn": sn}, headers=headers, timeout=20)
@@ -560,15 +516,15 @@ def poll_growatt():
                             pb = float(d.get("pBat") or 0)
                             sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
                             temp = float(d.get("temperature") or 0)
-                            
+
                             tot_out += op
                             tot_sol += sol
                             if pb > 0: tot_bat += pb
-                            
+
                             cfg = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown"})
                             info = {"SN": sn, "Label": cfg['label'], "OutputPower": op, "Capacity": cap, "vBat": vb, "temp": temp}
                             inv_data.append(info)
-                            
+
                             if cfg['type'] == 'primary': p_caps.append(cap)
                             elif cfg['type'] == 'backup':
                                 b_data = info
@@ -578,95 +534,68 @@ def poll_growatt():
             p_min = min(p_caps) if p_caps else 0
             b_volts = b_data['vBat'] if b_data else 0
             b_act = b_data['OutputPower'] > 50 if b_data else False
-            
+
             # Daily History Logic
             current_date = now.strftime('%Y-%m-%d')
             if daily_accumulator['last_date'] != current_date:
                 if daily_accumulator['last_date']:
-                    weather_potential_wh = get_daily_solar_potential(daily_accumulator['last_date'])
                     history_manager.update_daily(
                         daily_accumulator['last_date'],
                         daily_accumulator['consumption_wh'],
                         daily_accumulator['solar_wh'],
-                        weather_potential_wh
+                        TOTAL_SOLAR_CAPACITY_KW * 1000 * 10
                     )
                     history_manager.save_history()
-                    # Re-train ML model daily
-                    ai_detector.train_model()
                 daily_accumulator = {'consumption_wh': 0, 'solar_wh': 0, 'last_date': current_date}
-            
+
             interval_hours = POLL_INTERVAL_MINUTES / 60.0
             daily_accumulator['consumption_wh'] += tot_out * interval_hours
             daily_accumulator['solar_wh'] += tot_sol * interval_hours
-            
-            # Detection & Persistence
+
+            # CRITICAL: Detection & Persistence with manual generator check
             detected = identify_active_appliances(tot_out, prev_watts, gen_on, b_volts, p_min)
             is_manual_gen = any("Water" in x for x in detected)
-            if not is_manual_gen: load_manager.update(tot_out)
             
-            # Log for ML and Predict
-            ai_detector.log_data(tot_out)
-            ai_analysis = ai_detector.predict_load(tot_out)
+            # Only update load manager if NOT manually running generator for water heating
+            if not is_manual_gen: 
+                load_manager.update(tot_out)
             
             history_manager.add_hourly_datapoint(now, tot_out, tot_bat, tot_sol)
+
+            # IMPROVED: Alert logic with manual generator detection
+            # Don't send generator alert if it's manually on for water heating
+            if gen_on and not is_manual_gen: 
+                send_email("Generator ON", "Generator running", "gen", send_via_email=True)
             
+            # Critical battery alert
+            if p_min < 30: 
+                send_email("Battery Critical", f"Primary at {p_min}%", "crit", send_via_email=True)
+
             if (now - last_save) > timedelta(hours=1):
                 load_manager.save_data()
                 last_save = now
 
-            # --- UPDATED: ALERT LOGIC (From Code 2) ---
-            
-            # 1. Generator
-            if gen_on: send_email("Generator ON", "Generator running", "gen")
-            
-            # 2. Battery Critical
-            if p_min < 30: send_email("Battery Critical", f"Primary at {p_min}%", "crit")
-            
-            # 3. High Load Alert (Red Dashboard + Email)
-            if tot_out > 4500:
-                send_email("CRITICAL LOAD (>4.5kW)", f"Load is {tot_out}W", "load_crit")
-            elif tot_out > 3000:
-                # Check logic from Code 2: Don't spam if battery is full
-                if p_min < 90:
-                    send_email("High Load Alert (>3kW)", f"Load is {tot_out}W", "load_high")
-
-            # 4. Pool Pump Monitor (1200W detection + 3hr timer)
-            delta = tot_out - prev_watts
-            if 1000 < delta < 1400 and not pool_pump_running:
-                pool_pump_running = True
-                pool_start_time = now
-                send_email("Pool Pump Started", f"Load jump {delta}W", "pool_start")
-            elif -1400 < delta < -1000 and pool_pump_running:
-                pool_pump_running = False
-                pool_start_time = None
-            
-            if pool_pump_running and pool_start_time:
-                duration = (now - pool_start_time).total_seconds()
-                if duration > (3 * 3600):
-                    send_email("Pool Pump Overrun", "Pump running > 3 hours", "pool_overrun")
-
-            # Forecating & Simulation
+            # Forecasting & Simulation
             l_cast = load_manager.get_forecast(24)
             s_cast = generate_solar_forecast(wx_data)
-            
+
             # Calculate Breakdown & Simulation ensuring synchronization
             breakdown = calculate_battery_breakdown(p_min, b_volts)
             sim_res = calculate_battery_cascade(s_cast, l_cast, p_min, b_volts)
-            
-            # Use updated Smart Scheduler
+
             schedule = generate_smart_schedule(
                 status=breakdown['status_obj'],
                 solar_forecast_kw=s_cast, 
                 load_forecast_kw=l_cast,
                 now_hour=now.hour
             )
-            
-            # Remove status_obj before sending to frontend (not JSON serializable/needed)
+
+            # Remove status_obj before sending to frontend
             del breakdown['status_obj']
-            
+
             heatmap = history_manager.get_last_30_days()
             hourly_24h = history_manager.get_last_24h_data()
-            
+
             prev_watts = tot_out
             latest_data = {
                 "timestamp": now.strftime("%H:%M:%S"),
@@ -678,7 +607,6 @@ def poll_growatt():
                 "backup_active": b_act,
                 "generator_running": gen_on,
                 "detected_appliances": detected,
-                "ai_load_analysis": ai_analysis,
                 "load_forecast": l_cast[:12],
                 "solar_forecast": s_cast[:12],
                 "battery_sim": sim_res,
@@ -688,8 +616,8 @@ def poll_growatt():
                 "heatmap_data": heatmap,
                 "hourly_24h": hourly_24h
             }
-            print(f"Update: Load={tot_out}W, Analysis={ai_analysis}")
-            
+            print(f"Update: Load={tot_out}W, Battery={breakdown['total_pct']}%")
+
         except Exception as e: print(f"Error: {e}")
         if polling_active:
             for _ in range(POLL_INTERVAL_MINUTES * 60):
@@ -716,30 +644,10 @@ def start_polling():
 def api_data(): return jsonify(latest_data)
 
 @app.route("/")
-# ----------------------------
-# 5. UI & Routes
-# ----------------------------
-@app.route('/health')
-def health(): 
-    return jsonify({"status": "healthy", "polling_thread_alive": polling_active})
-
-@app.route('/start-polling')
-def start_polling():
-    global polling_active, polling_thread
-    if not polling_active:
-        polling_active = True
-        polling_thread = Thread(target=poll_growatt, daemon=True)
-        polling_thread.start()
-    return jsonify({"status": "started"})
-
-@app.route('/api/data')
-def api_data(): return jsonify(latest_data)
-
-@app.route("/")
 def home():
     d = latest_data
     def _n(k): return float(d.get(k, 0) or 0)
-    
+
     load = _n("total_output_power")
     solar = _n("total_solar_input_W")
     bat_dis = _n("total_battery_discharge_W")
@@ -747,7 +655,7 @@ def home():
     b_volt = _n("backup_battery_voltage")
     gen_on = d.get("generator_running", False)
     detected = d.get("detected_appliances", [])
-    
+
     breakdown = d.get("energy_breakdown") or {
         "chart_data": [1,0,1], 
         "tier_labels": ['Primary', 'Backup', 'Reserve'],
@@ -763,24 +671,20 @@ def home():
     schedule = d.get("scheduler") or []
     heatmap = d.get("heatmap_data") or []
     hourly_24h = d.get("hourly_24h") or []
-    
-    # --- ALERT LOGIC FOR DASHBOARD (Red Text/Borders) ---
+
     st_txt, st_col = "NORMAL", "var(--info)"
     if gen_on: st_txt, st_col = "GENERATOR ON", "var(--crit)"
-    elif load > 3000: st_txt, st_col = "HIGH LOAD ALERT", "var(--crit)"
     elif p_pct < 40: st_txt, st_col = "BACKUP ACTIVE", "var(--warn)"
     elif solar > load + 500: st_txt, st_col = "CHARGING", "var(--success)"
 
     is_charging = solar > (load + 100)
     is_discharging = bat_dis > 100 or load > solar
-    
+
     alerts = alert_history[:8]
     tier_labels = breakdown.get('tier_labels', ['Primary', 'Backup', 'Reserve'])
     primary_pct = breakdown.get('primary_pct', 0)
     backup_voltage = breakdown.get('backup_voltage', 0)
     backup_pct = breakdown.get('backup_pct', 0)
-    
-    ai_analysis = d.get('ai_load_analysis', 'Initializing...')
 
     html = """
 <!DOCTYPE html>
@@ -796,7 +700,7 @@ def home():
         :root { 
             --bg: #0a0e27; --bg-secondary: #151b3d; --card: rgba(21, 27, 61, 0.7); 
             --border: rgba(99, 102, 241, 0.2); --border-hover: rgba(99, 102, 241, 0.4);
-            --text: #e2e8f0; --text-muted: #94a3b8; --text-dim: #64748b;
+            --text: #e2e8f5; --text-muted: #94a3b8; --text-dim: #64748b;
             --success: #10b981; --warn: #f59e0b; --crit: #ef4444; --info: #3b82f6;
             --accent: #6366f1; --accent-glow: rgba(99, 102, 241, 0.3);
             --primary-color: #10b981; --backup-color: #3b82f6; --reserve-color: #f59e0b;
@@ -1260,16 +1164,11 @@ def home():
                 <div class="metric-val" style="color:var(--warn)">{{ '%0.f'|format(solar) }}<span style="font-size:1.2rem">W</span></div>
                 <div class="metric-unit">Current Input</div>
             </div>
-            
-            <!-- RED ALERT LOGIC HERE -->
-            <div class="col-3 card" style="{{ 'border-color: var(--crit); box-shadow: 0 0 20px rgba(239, 68, 68, 0.3);' if load > 3000 else '' }}">
+            <div class="col-3 card">
                 <div class="card-title">Home Consumption</div>
-                <div class="metric-val" style="color: {{ 'var(--crit)' if load > 3000 else 'var(--info)' }}">
-                    {{ '%0.f'|format(load) }}<span style="font-size:1.2rem">W</span>
-                </div>
+                <div class="metric-val" style="color:var(--info)">{{ '%0.f'|format(load) }}<span style="font-size:1.2rem">W</span></div>
                 <div class="metric-unit">Active Load</div>
             </div>
-            
             <div class="col-3 card">
                 <div class="card-title">Battery Status</div>
                 <div class="metric-val" style="color:var(--success)">{{ breakdown['total_pct'] }}<span style="font-size:1.2rem">%</span></div>
@@ -1279,17 +1178,6 @@ def home():
                 <div class="card-title">Grid Status</div>
                 <div class="metric-val" style="color:{{ 'var(--crit)' if gen_on else 'var(--text-dim)' }}">{{ 'ON' if gen_on else 'OFF' }}</div>
                 <div class="metric-unit">Generator/Grid</div>
-            </div>
-            
-            <!-- AI LOAD ANALYSIS -->
-            <div class="col-12 card" style="border: 1px solid var(--accent); background: rgba(99, 102, 241, 0.1);">
-                <div class="card-title" style="color: var(--accent); font-weight: 800;">AI Load Analysis</div>
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <div style="font-size: 1.5rem; font-weight: 700; color: var(--text);">
-                        {{ ai_analysis }}
-                    </div>
-                    <div style="font-size: 0.8rem; opacity: 0.7;">Based on real-time clustering</div>
-                </div>
             </div>
 
             <!-- 30-DAY HEATMAP -->
@@ -1738,7 +1626,6 @@ def home():
             const TOTAL_CAPACITY = (P_TOTAL * 0.60) + (B_TOTAL * 0.80) + (P_TOTAL * 0.20); 
             
             // Reconstruct initial state from simple variables
-            // This is safer than accessing the dictionary which might have deleted keys
             let curr_p_wh = ({{ p_pct }} / 100.0) * P_TOTAL;
             let curr_b_wh = ({{ backup_pct }} / 100.0) * B_TOTAL;
             
@@ -1747,7 +1634,6 @@ def home():
             let newSimTiers = [ tierData[0] ]; // Start with current tier
             
             // Loop through forecasts (N steps) to generate N+1 points
-            // Note: labels.length includes "Now" plus forecasts
             for(let i = 0; i < lForecast.length; i++) {
                 let baseL = (lForecast[i] ? lForecast[i].estimated_load : 1000);
                 let sol = (sForecast[i] ? sForecast[i].estimated_generation : 0);
@@ -1786,7 +1672,7 @@ def home():
                             curr_b_wh -= drain;
                             drain = 0;
                         } else {
-                            curr_b_wh = backup_min
+                            curr_b_wh = backup_min;
                             drain -= available_backup;
                         }
                     }
@@ -1845,8 +1731,7 @@ def home():
         s_fc=s_fc, l_fc=l_fc, sim=sim, breakdown=breakdown, schedule=schedule,
         heatmap=heatmap, alerts=alerts, hourly_24h=hourly_24h,
         tier_labels=tier_labels, primary_pct=primary_pct, 
-        backup_voltage=backup_voltage, backup_pct=backup_pct,
-        ai_analysis=ai_analysis
+        backup_voltage=backup_voltage, backup_pct=backup_pct
     )
 
 if __name__ == '__main__':
