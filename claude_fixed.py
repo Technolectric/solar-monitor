@@ -244,9 +244,12 @@ def get_energy_status(p_pct, b_volts):
     }
 
 def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now_hour=None):
-    """Smart appliance scheduler."""
+    """Smart appliance scheduler - coordinated with recommendations."""
     battery_kwh_available = status['total_available_wh'] / 1000
     battery_soc_pct = status['total_pct']  # Use total system availability
+    
+    # Get primary battery percentage from status
+    primary_pct = status.get('curr_p_wh', 0) / PRIMARY_BATTERY_CAPACITY_WH * 100
 
     current_solar_kw = solar_forecast_kw
     if isinstance(solar_forecast_kw, list) and len(solar_forecast_kw) > 0:
@@ -263,6 +266,14 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
     advice = []
     solar_surplus_kw = max(current_solar_kw - current_load_kw, 0)
     is_daytime = now_hour is None or (7 <= now_hour <= 18)
+    
+    # Check if there's a good solar window in forecast
+    has_good_solar_window = False
+    if isinstance(solar_forecast_kw, list):
+        for fc in solar_forecast_kw[:6]:  # Check next 6 hours
+            if fc.get('estimated_generation', 0) > 2000:
+                has_good_solar_window = True
+                break
 
     for app in APPLIANCE_PROFILES:
         app_kw = app["watts"] / 1000
@@ -270,18 +281,58 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
 
         decision = {"msg": "Wait", "status": "unsafe", "color": "var(--warn)", "reason": ""}
 
-        if battery_soc_pct < 40:
-            decision.update({"msg": "Battery Too Low", "reason": f"System at {battery_soc_pct:.0f}%"})
+        # CRITICAL: Check primary battery threshold for heavy loads (>1500W)
+        if app["watts"] > 1500 and primary_pct <= 75:
+            decision.update({
+                "msg": "Primary Too Low", 
+                "status": "unsafe",
+                "color": "var(--warn)",
+                "reason": f"Primary {primary_pct:.0f}% (need >75% for heavy loads)"
+            })
+        elif battery_soc_pct < 40:
+            decision.update({
+                "msg": "Battery Too Low", 
+                "reason": f"System at {battery_soc_pct:.0f}%"
+            })
         elif solar_surplus_kw >= app_kw and is_daytime:
-            decision.update({"msg": "Safe to Run (Solar)", "status": "safe", "color": "var(--success)", "reason": f"Solar surplus {solar_surplus_kw:.1f} kW"})
-        elif battery_kwh_available >= app_kwh_required * 1.3 and battery_soc_pct >= 60:
-            decision.update({"msg": "Safe to Run (Battery)", "status": "safe", "color": "var(--success)", "reason": f"Battery {battery_kwh_available:.1f} kWh available"})
+            decision.update({
+                "msg": "Safe to Run (Solar)", 
+                "status": "safe", 
+                "color": "var(--success)", 
+                "reason": f"Solar surplus {solar_surplus_kw:.1f} kW"
+            })
+        elif primary_pct > 75 and battery_kwh_available >= app_kwh_required * 1.3 and battery_soc_pct >= 60:
+            # Only allow battery use if primary >75% for heavy loads
+            decision.update({
+                "msg": "Safe to Run (Battery)", 
+                "status": "safe", 
+                "color": "var(--success)", 
+                "reason": f"Primary {primary_pct:.0f}%, Battery {battery_kwh_available:.1f} kWh"
+            })
+        elif not has_good_solar_window and is_daytime:
+            decision.update({
+                "msg": "Poor Solar Forecast", 
+                "reason": "No good solar window today"
+            })
         elif is_daytime:
-            decision.update({"msg": "Wait for More Solar", "reason": f"Surplus {solar_surplus_kw:.1f} kW < {app_kw:.1f} kW needed"})
+            decision.update({
+                "msg": "Wait for More Solar", 
+                "reason": f"Surplus {solar_surplus_kw:.1f} kW < {app_kw:.1f} kW needed"
+            })
         else:
-            decision.update({"msg": "Avoid Night Use", "reason": "Nighttime battery preservation"})
+            decision.update({
+                "msg": "Avoid Night Use", 
+                "reason": "Nighttime battery preservation"
+            })
 
-        advice.append({**app, "required_kwh": round(app_kwh_required, 2), "decision": decision["msg"], "status": decision["status"], "color": decision["color"], "reason": decision["reason"]})
+        advice.append({
+            **app, 
+            "required_kwh": round(app_kwh_required, 2), 
+            "decision": decision["msg"], 
+            "status": decision["status"], 
+            "color": decision["color"], 
+            "reason": decision["reason"]
+        })
 
     return advice
 
