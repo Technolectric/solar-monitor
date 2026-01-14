@@ -401,6 +401,11 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts):
 headers = {"token": TOKEN, "Content-Type": "application/x-www-form-urlencoded"} if TOKEN else {}
 last_alert_time, alert_history = {}, []
 daily_accumulator = {'consumption_wh': 0, 'solar_wh': 0, 'last_date': None}
+
+# Pool pump monitoring
+pool_pump_start_time = None
+pool_pump_last_alert = None
+
 latest_data = {
     "timestamp": "Initializing...", "total_output_power": 0, "total_solar_input_W": 0,
     "primary_battery_min": 0, "backup_battery_voltage": 0, "backup_active": False,
@@ -482,7 +487,7 @@ polling_active = False
 polling_thread = None
 
 def poll_growatt():
-    global latest_data, polling_active, daily_accumulator
+    global latest_data, polling_active, daily_accumulator, pool_pump_start_time, pool_pump_last_alert
     if not TOKEN: return
 
     wx_data = get_weather_forecast()
@@ -570,6 +575,28 @@ def poll_growatt():
             # Critical battery alert
             if p_min < 30: 
                 send_email("Battery Critical", f"Primary at {p_min}%", "crit", send_via_email=True)
+
+            # Pool pump monitoring - check for sustained high discharge after 4pm
+            if now.hour >= 16:
+                if tot_bat > 1100:
+                    if pool_pump_start_time is None:
+                        pool_pump_start_time = now
+                    
+                    duration = now - pool_pump_start_time
+                    if duration > timedelta(hours=3) and now.hour >= 18:
+                        if pool_pump_last_alert is None or (now - pool_pump_last_alert) > timedelta(hours=1):
+                            duration_hours = int(duration.total_seconds() // 3600)
+                            send_email(
+                                "⚠️ HIGH LOAD ALERT: Pool Pumps?", 
+                                f"Battery discharge has been over 1.1kW for {duration_hours} hours. Did you leave the pool pumps on?", 
+                                "high_load_continuous",
+                                send_via_email=True
+                            )
+                            pool_pump_last_alert = now
+                else:
+                    pool_pump_start_time = None
+            else:
+                pool_pump_start_time = None
 
             if (now - last_save) > timedelta(hours=1):
                 load_manager.save_data()
