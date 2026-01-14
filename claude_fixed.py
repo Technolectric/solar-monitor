@@ -20,6 +20,7 @@ TOKEN = os.getenv("API_TOKEN")
 SERIAL_NUMBERS = os.getenv("SERIAL_NUMBERS", "").split(",")
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
 DATA_FILE = "load_patterns.json"
+HISTORY_FILE = "daily_history.json"
 
 # Inverter Mapping
 INVERTER_CONFIG = {
@@ -85,7 +86,69 @@ class PersistentLoadManager:
             forecast.append({'time': ft, 'estimated_load': est})
         return forecast
 
+class DailyHistoryManager:
+    def __init__(self, filename):
+        self.filename = filename
+        self.history = self.load_history()
+        
+    def load_history(self):
+        if Path(self.filename).exists():
+            try:
+                with open(self.filename, 'r') as f:
+                    return json.load(f)
+            except: pass
+        return {}
+    
+    def save_history(self):
+        try:
+            with open(self.filename, 'w') as f:
+                json.dump(self.history, f)
+        except: pass
+    
+    def update_daily(self, date_str, total_consumption_wh, total_solar_wh, max_solar_potential_wh):
+        """Update daily totals"""
+        if date_str not in self.history:
+            self.history[date_str] = {
+                'consumption': 0,
+                'solar': 0,
+                'potential': max_solar_potential_wh
+            }
+        self.history[date_str]['consumption'] = total_consumption_wh
+        self.history[date_str]['solar'] = total_solar_wh
+        
+        # Keep only last 30 days
+        dates = sorted(self.history.keys())
+        if len(dates) > 30:
+            for old_date in dates[:-30]:
+                del self.history[old_date]
+    
+    def get_last_30_days(self):
+        """Return last 30 days of data for heatmap"""
+        now = datetime.now(EAT)
+        result = []
+        for i in range(29, -1, -1):
+            date = now - timedelta(days=i)
+            date_str = date.strftime('%Y-%m-%d')
+            data = self.history.get(date_str, {'consumption': 0, 'solar': 0, 'potential': 0})
+            
+            # Calculate efficiency (how much of potential was used)
+            efficiency = 0
+            if data['potential'] > 0:
+                efficiency = min(100, (data['solar'] / data['potential']) * 100)
+            
+            result.append({
+                'date': date_str,
+                'day': date.day,
+                'month': date.strftime('%b'),
+                'weekday': date.strftime('%a'),
+                'consumption_kwh': round(data['consumption'] / 1000, 1),
+                'solar_kwh': round(data['solar'] / 1000, 1),
+                'efficiency': round(efficiency, 0)
+            })
+        return result
+
 load_manager = PersistentLoadManager(DATA_FILE)
+history_manager = DailyHistoryManager(HISTORY_FILE)
 
 def identify_active_appliances(current, previous, gen_active, backup_volts, primary_pct):
     detected = []
@@ -186,6 +249,7 @@ def calculate_battery_cascade(solar, load, p_pct, b_active=False):
 # ----------------------------
 headers = {"token": TOKEN, "Content-Type": "application/x-www-form-urlencoded"} if TOKEN else {}
 last_alert_time, alert_history = {}, []
+daily_accumulator = {'consumption_wh': 0, 'solar_wh': 0, 'last_date': None}
 latest_data = {
     "timestamp": "Initializing...", "total_output_power": 0, "total_solar_input_W": 0,
     "primary_battery_min": 0, "backup_battery_voltage": 0, "backup_active": False,
@@ -193,7 +257,8 @@ latest_data = {
     "solar_forecast": [], "load_forecast": [], 
     "battery_sim": {"labels": [], "data": []},
     "energy_breakdown": {"chart_data": [1, 0, 1], "total_pct": 0, "total_kwh": 0},
-    "scheduler": []
+    "scheduler": [],
+    "heatmap_data": []
 }
 
 def get_weather_forecast():
@@ -236,7 +301,7 @@ polling_active = False
 polling_thread = None
 
 def poll_growatt():
-    global latest_data, polling_active
+    global latest_data, polling_active, daily_accumulator
     if not TOKEN: return
 
     wx_data = get_weather_forecast()
@@ -244,7 +309,7 @@ def poll_growatt():
     last_save = datetime.now(EAT)
     polling_active = True
     
-    print("🚀 System Started: Hybrid Visual Mode")
+    print("🚀 System Started: Enhanced Dashboard Mode")
 
     while polling_active:
         try:
@@ -283,6 +348,26 @@ def poll_growatt():
             b_volts = b_data['vBat'] if b_data else 0
             b_act = b_data['OutputPower'] > 50 if b_data else False
             
+            # Daily accumulation
+            current_date = now.strftime('%Y-%m-%d')
+            if daily_accumulator['last_date'] != current_date:
+                # New day - save yesterday's data
+                if daily_accumulator['last_date']:
+                    history_manager.update_daily(
+                        daily_accumulator['last_date'],
+                        daily_accumulator['consumption_wh'],
+                        daily_accumulator['solar_wh'],
+                        TOTAL_SOLAR_CAPACITY_KW * 1000 * 10  # ~10 hours avg potential
+                    )
+                    history_manager.save_history()
+                # Reset for new day
+                daily_accumulator = {'consumption_wh': 0, 'solar_wh': 0, 'last_date': current_date}
+            
+            # Accumulate (Wh = W * hours, so W * (minutes/60))
+            interval_hours = POLL_INTERVAL_MINUTES / 60.0
+            daily_accumulator['consumption_wh'] += tot_out * interval_hours
+            daily_accumulator['solar_wh'] += tot_sol * interval_hours
+            
             detected = identify_active_appliances(tot_out, prev_watts, gen_on, b_volts, p_min)
             is_manual_gen = any("Water" in x for x in detected)
             if not is_manual_gen: load_manager.update(tot_out)
@@ -298,9 +383,8 @@ def poll_growatt():
             s_cast = generate_solar_forecast(wx_data)
             sim_res = calculate_battery_cascade(s_cast, l_cast, p_min, b_act)
             breakdown = calculate_battery_breakdown(p_min, b_volts)
-            
-            # --- Schedule ---
             schedule = generate_smart_schedule(p_min, s_cast, l_cast)
+            heatmap = history_manager.get_last_30_days()
             
             prev_watts = tot_out
             latest_data = {
@@ -318,7 +402,8 @@ def poll_growatt():
                 "battery_sim": sim_res,
                 "energy_breakdown": breakdown,
                 "scheduler": schedule,
-                "inverters": inv_data
+                "inverters": inv_data,
+                "heatmap_data": heatmap
             }
             print(f"Update: Load={tot_out}W")
             
@@ -363,6 +448,7 @@ def home():
     s_fc = d.get("solar_forecast") or []
     l_fc = d.get("load_forecast") or []
     schedule = d.get("scheduler") or []
+    heatmap = d.get("heatmap_data") or []
     
     st_txt, st_col = "NORMAL", "var(--info)"
     if gen_on: st_txt, st_col = "GENERATOR ON", "var(--crit)"
@@ -372,7 +458,6 @@ def home():
     is_charging = solar > (load + 100)
     is_discharging = bat_dis > 100 or load > solar
     
-    # Force X axis labels if they exist
     c_labels = [x['time'].strftime('%H:%M') for x in l_fc] if l_fc else []
     c_load = [x['estimated_load'] for x in l_fc] if l_fc else []
     c_solar = [x['estimated_generation'] for x in s_fc[:len(l_fc)]] if s_fc else []
@@ -384,160 +469,623 @@ def home():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Solar Monitor</title>
-    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Space+Mono:wght@700&display=swap" rel="stylesheet">
+    <title>Solar Monitor Pro</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Manrope:wght@400;600;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
         :root { 
-            --bg: #000000; --card: rgba(25, 25, 25, 0.6); --border: rgba(255, 255, 255, 0.1); 
-            --text: #ffffff; --text-muted: #888;
-            --success: #3fb950; --warn: #ffa500; --crit: #ff4444; --info: #00bfff;
+            --bg: #0a0e27; --bg-secondary: #151b3d; --card: rgba(21, 27, 61, 0.7); 
+            --border: rgba(99, 102, 241, 0.2); --border-hover: rgba(99, 102, 241, 0.4);
+            --text: #e2e8f0; --text-muted: #94a3b8; --text-dim: #64748b;
+            --success: #10b981; --warn: #f59e0b; --crit: #ef4444; --info: #3b82f6;
+            --accent: #6366f1; --accent-glow: rgba(99, 102, 241, 0.3);
+            --gradient-1: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --gradient-2: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            --gradient-solar: linear-gradient(135deg, #ffd89b 0%, #19547b 100%);
         }
-        body { background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif; margin: 0; padding: 15px; }
-        .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 15px; max-width: 1400px; margin: 0 auto; }
-        .col-12 { grid-column: span 12; } .col-6 { grid-column: span 12; } .col-4 { grid-column: span 12; } .col-3 { grid-column: span 6; }
-        @media(min-width:768px){ .col-6 { grid-column: span 6; } .col-4 { grid-column: span 4; } .col-3 { grid-column: span 3; } }
         
-        .card { background: var(--card); border: 1px solid var(--border); border-radius: 20px; padding: 20px; box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5); backdrop-filter: blur(10px); }
-        h2 { font-size: 0.9rem; text-transform: uppercase; color: var(--text-muted); margin: 0 0 15px 0; letter-spacing: 1px; }
-        .metric-val { font-family: 'Space Mono'; font-size: 1.8rem; font-weight: 700; }
-        .metric-unit { font-size: 0.9rem; color: var(--text-muted); }
-        .tag { padding: 5px 12px; border-radius: 50px; font-size: 0.8rem; font-weight: 700; background: rgba(255,255,255,0.1); border: 1px solid var(--border); display: inline-flex; align-items: center; gap: 6px; margin-right: 5px; }
+        * { box-sizing: border-box; }
         
-        /* Power Flow Animation */
-        .flow-diagram { position: relative; height: 300px; width: 100%; display: flex; justify-content: center; align-items: center; }
-        .node { position: absolute; width: 80px; height: 80px; border-radius: 50%; background: #111; border: 2px solid #333; z-index: 2; display: flex; flex-direction: column; align-items: center; justify-content: center; box-shadow: 0 0 20px rgba(0,0,0,0.5); transition: all 0.3s ease; }
-        .node-val { font-family: 'Space Mono'; font-size: 11px; font-weight: bold; }
-        .n-solar { top: 10px; left: 50%; transform: translateX(-50%); border-color: var(--warn); }
-        .n-inv   { top: 50%; left: 50%; transform: translate(-50%, -50%); width: 100px; height: 100px; border-color: var(--info); }
-        .n-home  { top: 50%; right: 10%; transform: translateY(-50%); border-color: var(--info); }
-        .n-bat   { bottom: 10px; left: 50%; transform: translateX(-50%); border-color: var(--success); }
-        .n-gen   { top: 50%; left: 10%; transform: translateY(-50%); border-color: var(--crit); }
+        body { 
+            background: var(--bg);
+            background-image: 
+                radial-gradient(ellipse at top, rgba(99, 102, 241, 0.15) 0%, transparent 50%),
+                radial-gradient(ellipse at bottom right, rgba(245, 158, 11, 0.1) 0%, transparent 50%);
+            color: var(--text); 
+            font-family: 'Manrope', sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            min-height: 100vh;
+        }
         
-        .line { position: absolute; background: #333; z-index: 1; overflow: hidden; }
-        .line-v { width: 4px; height: 80px; left: 50%; transform: translateX(-50%); }
-        .l-solar { top: 90px; } .l-bat { bottom: 90px; }
-        .line-h { height: 4px; width: 25%; top: 50%; transform: translateY(-50%); }
-        .l-gen { left: 18%; } .l-home { right: 18%; }
+        .container { max-width: 1600px; margin: 0 auto; }
         
-        .dot { position: absolute; background: #fff; border-radius: 50%; width: 6px; height: 6px; box-shadow: 0 0 10px #fff; opacity: 0; }
-        .flow-down .dot { left: -1px; animation: flowY 1.5s linear infinite; opacity: 1; }
-        .flow-up .dot { left: -1px; animation: flowY-rev 1.5s linear infinite; opacity: 1; }
-        .flow-right .dot { top: -1px; animation: flowX 1.5s linear infinite; opacity: 1; }
-        @keyframes flowY { 0%{top:0%} 100%{top:100%} } @keyframes flowY-rev { 0%{top:100%} 100%{top:0%} } @keyframes flowX { 0%{left:0%} 100%{left:100%} }
-        .pulse-g { animation: p-g 2s infinite; } .pulse-r { animation: p-r 2s infinite; } .pulse-y { animation: p-y 2s infinite; }
-        @keyframes p-g { 0%{box-shadow:0 0 0 0 rgba(0,255,0,0.4)} 70%{box-shadow:0 0 0 15px rgba(0,255,0,0)} 100%{box-shadow:0 0 0 0 rgba(0,255,0,0)} }
-        @keyframes p-r { 0%{box-shadow:0 0 0 0 rgba(255,0,0,0.4)} 70%{box-shadow:0 0 0 15px rgba(255,0,0,0)} 100%{box-shadow:0 0 0 0 rgba(255,0,0,0)} }
-        @keyframes p-y { 0%{box-shadow:0 0 0 0 rgba(255,165,0,0.4)} 70%{box-shadow:0 0 0 15px rgba(255,165,0,0)} 100%{box-shadow:0 0 0 0 rgba(255,165,0,0)} }
+        .header {
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            margin-bottom: 30px;
+            padding: 20px 30px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            backdrop-filter: blur(20px);
+        }
+        
+        .header h1 { 
+            margin: 0; 
+            font-size: 1.8rem; 
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--accent) 0%, var(--info) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.5px;
+        }
+        
+        .status-badge {
+            padding: 8px 20px;
+            border-radius: 50px;
+            font-size: 0.9rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            background: var(--accent-glow);
+            border: 2px solid;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.8; }
+        }
+        
+        .time-display {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: var(--text);
+        }
+        
+        .grid { 
+            display: grid; 
+            grid-template-columns: repeat(12, 1fr); 
+            gap: 20px;
+        }
+        
+        .col-12 { grid-column: span 12; } 
+        .col-6 { grid-column: span 12; } 
+        .col-4 { grid-column: span 12; } 
+        .col-3 { grid-column: span 6; }
+        .col-8 { grid-column: span 12; }
+        
+        @media(min-width:768px){ 
+            .col-6 { grid-column: span 6; } 
+            .col-4 { grid-column: span 4; } 
+            .col-3 { grid-column: span 3; }
+            .col-8 { grid-column: span 8; }
+        }
+        
+        .card { 
+            background: var(--card); 
+            border: 1px solid var(--border); 
+            border-radius: 20px; 
+            padding: 25px; 
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3); 
+            backdrop-filter: blur(20px);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: var(--gradient-1);
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        
+        .card:hover {
+            border-color: var(--border-hover);
+            transform: translateY(-2px);
+            box-shadow: 0 15px 50px rgba(0, 0, 0, 0.4);
+        }
+        
+        .card:hover::before {
+            opacity: 1;
+        }
+        
+        .card-title { 
+            font-size: 0.75rem; 
+            text-transform: uppercase; 
+            color: var(--text-muted); 
+            margin: 0 0 12px 0; 
+            letter-spacing: 2px; 
+            font-weight: 600;
+        }
+        
+        .metric-val { 
+            font-family: 'JetBrains Mono', monospace; 
+            font-size: 2.2rem; 
+            font-weight: 700; 
+            line-height: 1.2;
+            background: linear-gradient(135deg, var(--text) 0%, var(--text-muted) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .metric-unit { 
+            font-size: 0.85rem; 
+            color: var(--text-dim); 
+            font-weight: 600;
+        }
+        
+        .tag { 
+            padding: 6px 14px; 
+            border-radius: 50px; 
+            font-size: 0.75rem; 
+            font-weight: 700; 
+            background: rgba(99, 102, 241, 0.15); 
+            border: 1px solid var(--border); 
+            display: inline-flex; 
+            align-items: center; 
+            gap: 6px; 
+            margin: 4px 4px 4px 0;
+            transition: all 0.2s;
+        }
+        
+        .tag:hover {
+            background: rgba(99, 102, 241, 0.25);
+            transform: translateY(-1px);
+        }
+        
+        /* Enhanced Power Flow */
+        .flow-diagram { 
+            position: relative; 
+            height: 320px; 
+            width: 100%; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center;
+            background: radial-gradient(ellipse at center, rgba(99, 102, 241, 0.05) 0%, transparent 70%);
+        }
+        
+        .node { 
+            position: absolute; 
+            width: 90px; 
+            height: 90px; 
+            border-radius: 50%; 
+            background: var(--bg-secondary); 
+            border: 3px solid var(--border); 
+            z-index: 2; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            justify-content: center; 
+            box-shadow: 0 5px 25px rgba(0, 0, 0, 0.4);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .node:hover {
+            transform: scale(1.1);
+            box-shadow: 0 8px 35px rgba(0, 0, 0, 0.5);
+        }
+        
+        .node-icon { font-size: 1.8rem; margin-bottom: 4px; }
+        .node-val { 
+            font-family: 'JetBrains Mono'; 
+            font-size: 0.7rem; 
+            font-weight: bold; 
+            color: var(--text-muted);
+        }
+        
+        .n-solar { top: 15px; left: 50%; transform: translateX(-50%); border-color: var(--warn); }
+        .n-inv   { top: 50%; left: 50%; transform: translate(-50%, -50%); width: 110px; height: 110px; border-color: var(--info); }
+        .n-home  { top: 50%; right: 12%; transform: translateY(-50%); border-color: var(--success); }
+        .n-bat   { bottom: 15px; left: 50%; transform: translateX(-50%); border-color: var(--success); }
+        .n-gen   { top: 50%; left: 12%; transform: translateY(-50%); border-color: var(--crit); }
+        
+        .line { position: absolute; background: var(--border); z-index: 1; overflow: hidden; border-radius: 2px; }
+        .line-v { width: 5px; height: 85px; left: 50%; transform: translateX(-50%); }
+        .l-solar { top: 105px; } 
+        .l-bat { bottom: 105px; }
+        .line-h { height: 5px; width: 28%; top: 50%; transform: translateY(-50%); }
+        .l-gen { left: 18%; } 
+        .l-home { right: 18%; }
+        
+        .dot { 
+            position: absolute; 
+            background: var(--accent); 
+            border-radius: 50%; 
+            width: 8px; 
+            height: 8px; 
+            box-shadow: 0 0 15px var(--accent-glow); 
+            opacity: 0; 
+        }
+        
+        .flow-down .dot { left: -1.5px; animation: flowY 1.8s linear infinite; opacity: 1; }
+        .flow-up .dot { left: -1.5px; animation: flowY-rev 1.8s linear infinite; opacity: 1; }
+        .flow-right .dot { top: -1.5px; animation: flowX 1.8s linear infinite; opacity: 1; }
+        
+        @keyframes flowY { 0%{top:0%} 100%{top:100%} } 
+        @keyframes flowY-rev { 0%{top:100%} 100%{top:0%} } 
+        @keyframes flowX { 0%{left:0%} 100%{left:100%} }
+        
+        .pulse-g { animation: pulse-green 2s infinite; } 
+        .pulse-r { animation: pulse-red 2s infinite; } 
+        .pulse-y { animation: pulse-yellow 2s infinite; }
+        
+        @keyframes pulse-green { 
+            0%{box-shadow:0 0 0 0 rgba(16, 185, 129, 0.7)} 
+            70%{box-shadow:0 0 0 20px rgba(16, 185, 129, 0)} 
+            100%{box-shadow:0 0 0 0 rgba(16, 185, 129, 0)} 
+        }
+        @keyframes pulse-red { 
+            0%{box-shadow:0 0 0 0 rgba(239, 68, 68, 0.7)} 
+            70%{box-shadow:0 0 0 20px rgba(239, 68, 68, 0)} 
+            100%{box-shadow:0 0 0 0 rgba(239, 68, 68, 0)} 
+        }
+        @keyframes pulse-yellow { 
+            0%{box-shadow:0 0 0 0 rgba(245, 158, 11, 0.7)} 
+            70%{box-shadow:0 0 0 20px rgba(245, 158, 11, 0)} 
+            100%{box-shadow:0 0 0 0 rgba(245, 158, 11, 0)} 
+        }
 
-        /* Scenario Controls */
-        .sched-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }
-        .sched-tile { 
-            background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 16px; padding: 15px;
-            display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
-            cursor: pointer; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        /* Enhanced Scheduler */
+        .sched-grid { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); 
+            gap: 15px; 
         }
-        .sched-tile:hover { background: rgba(255,255,255,0.08); transform: translateY(-2px); }
-        .sched-tile.active { border-color: var(--info); background: rgba(0, 191, 255, 0.15); box-shadow: 0 0 20px rgba(0, 191, 255, 0.2); }
-        .tile-icon { font-size: 2rem; margin-bottom: 8px; }
-        .tile-name { font-weight: 700; font-size: 0.95rem; margin-bottom: 4px; }
-        .tile-status { font-size: 0.75rem; font-weight: 600; padding: 2px 8px; border-radius: 10px; background: rgba(0,0,0,0.3); }
         
-        .alert-row { display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 8px 0; font-size: 0.9rem; }
+        .sched-tile { 
+            background: rgba(99, 102, 241, 0.05); 
+            border: 2px solid var(--border); 
+            border-radius: 18px; 
+            padding: 18px;
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            justify-content: center; 
+            text-align: center;
+            cursor: pointer; 
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .sched-tile::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(99, 102, 241, 0.1), transparent);
+            transition: left 0.5s;
+        }
+        
+        .sched-tile:hover::before {
+            left: 100%;
+        }
+        
+        .sched-tile:hover { 
+            background: rgba(99, 102, 241, 0.15); 
+            transform: translateY(-3px); 
+            border-color: var(--accent);
+            box-shadow: 0 10px 30px rgba(99, 102, 241, 0.3);
+        }
+        
+        .sched-tile.active { 
+            border-color: var(--accent); 
+            background: rgba(99, 102, 241, 0.2); 
+            box-shadow: 0 0 30px rgba(99, 102, 241, 0.4);
+        }
+        
+        .tile-icon { font-size: 2.5rem; margin-bottom: 10px; }
+        .tile-name { font-weight: 700; font-size: 1rem; margin-bottom: 6px; color: var(--text); }
+        .tile-status { 
+            font-size: 0.7rem; 
+            font-weight: 700; 
+            padding: 4px 10px; 
+            border-radius: 12px; 
+            background: rgba(0,0,0,0.4);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        /* Heatmap Calendar */
+        .heatmap-container {
+            padding: 10px 0;
+        }
+        
+        .heatmap-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
+            gap: 8px;
+            margin-top: 15px;
+        }
+        
+        .heatmap-cell {
+            aspect-ratio: 1;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.7rem;
+            font-weight: 700;
+            transition: all 0.3s;
+            cursor: pointer;
+            border: 1px solid var(--border);
+            position: relative;
+        }
+        
+        .heatmap-cell:hover {
+            transform: scale(1.15);
+            z-index: 10;
+            box-shadow: 0 5px 20px rgba(0, 0, 0, 0.4);
+        }
+        
+        .heatmap-day { font-size: 0.9rem; margin-bottom: 2px; }
+        .heatmap-eff { font-size: 0.65rem; opacity: 0.8; }
+        
+        /* Efficiency color scale */
+        .eff-0 { background: rgba(100, 116, 139, 0.3); }
+        .eff-1 { background: rgba(239, 68, 68, 0.3); border-color: rgba(239, 68, 68, 0.5); }
+        .eff-2 { background: rgba(245, 158, 11, 0.3); border-color: rgba(245, 158, 11, 0.5); }
+        .eff-3 { background: rgba(250, 204, 21, 0.3); border-color: rgba(250, 204, 21, 0.5); }
+        .eff-4 { background: rgba(132, 204, 22, 0.3); border-color: rgba(132, 204, 22, 0.5); }
+        .eff-5 { background: rgba(16, 185, 129, 0.4); border-color: rgba(16, 185, 129, 0.6); }
+        
+        .heatmap-legend {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-top: 20px;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .legend-box {
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+            border: 1px solid var(--border);
+        }
+        
+        .alert-row { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
+            border-bottom: 1px solid var(--border); 
+            padding: 12px 0; 
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+        
+        .alert-row:hover {
+            background: rgba(99, 102, 241, 0.05);
+            padding-left: 10px;
+        }
+        
+        .alert-row:last-child { border-bottom: none; }
+        
+        .alert-time {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            color: var(--text-dim);
+        }
+        
+        /* Chart improvements */
+        canvas {
+            filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.2));
+        }
+        
+        /* Tooltip */
+        .tooltip {
+            position: absolute;
+            background: rgba(15, 23, 42, 0.95);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 0.75rem;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+        }
+        
+        .heatmap-cell:hover .tooltip {
+            opacity: 1;
+        }
     </style>
 </head>
 <body>
-    <div class="grid">
-        <div class="col-12" style="display:flex; justify-content:space-between; align-items:center;">
-            <div><h1 style="margin:0; font-size:1.4rem">SOLAR MONITOR</h1><span style="color:{{ st_col }}">{{ st_txt }}</span></div>
-            <div style="font-family:'Space Mono'; font-size:1.2rem">{{ d.timestamp.split(' ')[1] }}</div>
-        </div>
-
-        <!-- VISUAL POWER FLOW -->
-        <div class="col-12 card" style="padding:0; overflow:hidden">
-            <div class="flow-diagram">
-                <div class="line line-v l-solar {{ 'flow-down' if solar > 50 else '' }}"><div class="dot"></div></div>
-                <div class="line line-v l-bat {{ 'flow-down' if is_charging else ('flow-up' if is_discharging else '') }}"><div class="dot"></div></div>
-                <div class="line line-h l-home {{ 'flow-right' if load > 100 else '' }}"><div class="dot"></div></div>
-                <div class="line line-h l-gen {{ 'flow-right' if gen_on else '' }}"><div class="dot"></div></div>
-                
-                <div class="node n-solar {{ 'pulse-y' if solar > 50 else '' }}"><div>☀️</div><div class="node-val">{{ '%0.f'|format(solar) }}W</div></div>
-                <div class="node n-gen {{ 'pulse-r' if gen_on else '' }}"><div>⚙️</div><div class="node-val">{{ 'ON' if gen_on else 'OFF' }}</div></div>
-                <div class="node n-inv"><div>⚡</div><div class="node-val">INV</div></div>
-                <div class="node n-home {{ 'pulse-g' if load > 2000 else '' }}"><div>🏠</div><div class="node-val">{{ '%0.f'|format(load) }}W</div></div>
-                <div class="node n-bat {{ 'pulse-g' if is_charging else ('pulse-r' if is_discharging else '') }}"><div>🔋</div><div class="node-val">{{ breakdown.total_pct }}%</div></div>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1>⚡ SOLAR MONITOR PRO</h1>
+                <span class="status-badge" style="border-color: {{ st_col }}; color: {{ st_col }}">{{ st_txt }}</span>
             </div>
+            <div class="time-display">{{ d['timestamp'] }}</div>
         </div>
 
-        <!-- KEY METRICS -->
-        <div class="col-3 card">
-            <div class="metric-unit">Solar Input</div>
-            <div class="metric-val" style="color:var(--warn)">{{ '%0.f'|format(solar) }}<span style="font-size:1rem">W</span></div>
-        </div>
-        <div class="col-3 card">
-            <div class="metric-unit">Current Load</div>
-            <div class="metric-val" style="color:var(--info)">{{ '%0.f'|format(load) }}<span style="font-size:1rem">W</span></div>
-        </div>
-        <div class="col-3 card">
-            <div class="metric-unit">Usable Battery</div>
-            <div class="metric-val" style="color:var(--success)">{{ breakdown.total_pct }}<span style="font-size:1rem">%</span></div>
-        </div>
-        <div class="col-3 card">
-            <div class="metric-unit">Grid/Gen</div>
-            <div class="metric-val" style="color:{{ 'var(--crit)' if gen_on else '#555' }}">{{ 'ON' if gen_on else 'OFF' }}</div>
-        </div>
-
-        <!-- SCENARIO PLANNER -->
-        <div class="col-12 card">
-            <h3 style="margin-top:0">Smart Scheduler (Click to Simulate)</h3>
-            <div class="sched-grid">
-                {% for s in schedule %}
-                <div class="sched-tile" onclick="toggleSim('{{ s.id }}', {{ s.watts }})" id="btn-{{ s.id }}">
-                    <div class="tile-icon">{{ s.icon }}</div>
-                    <div class="tile-name">{{ s.name }}</div>
-                    <div class="tile-status" style="color: {{ s.color }}">{{ s.msg }}</div>
+        <div class="grid">
+            <!-- VISUAL POWER FLOW -->
+            <div class="col-12 card">
+                <div class="card-title">Real-Time Energy Flow</div>
+                <div class="flow-diagram">
+                    <div class="line line-v l-solar {{ 'flow-down' if solar > 50 else '' }}"><div class="dot"></div></div>
+                    <div class="line line-v l-bat {{ 'flow-down' if is_charging else ('flow-up' if is_discharging else '') }}"><div class="dot"></div></div>
+                    <div class="line line-h l-home {{ 'flow-right' if load > 100 else '' }}"><div class="dot"></div></div>
+                    <div class="line line-h l-gen {{ 'flow-right' if gen_on else '' }}"><div class="dot"></div></div>
+                    
+                    <div class="node n-solar {{ 'pulse-y' if solar > 50 else '' }}">
+                        <div class="node-icon">☀️</div>
+                        <div class="node-val">{{ '%0.f'|format(solar) }}W</div>
+                    </div>
+                    <div class="node n-gen {{ 'pulse-r' if gen_on else '' }}">
+                        <div class="node-icon">⚙️</div>
+                        <div class="node-val">{{ 'ON' if gen_on else 'OFF' }}</div>
+                    </div>
+                    <div class="node n-inv">
+                        <div class="node-icon">⚡</div>
+                        <div class="node-val">INV</div>
+                    </div>
+                    <div class="node n-home {{ 'pulse-g' if load > 2000 else '' }}">
+                        <div class="node-icon">🏠</div>
+                        <div class="node-val">{{ '%0.f'|format(load) }}W</div>
+                    </div>
+                    <div class="node n-bat {{ 'pulse-g' if is_charging else ('pulse-r' if is_discharging else '') }}">
+                        <div class="node-icon">🔋</div>
+                        <div class="node-val">{{ breakdown['total_pct'] }}%</div>
+                    </div>
                 </div>
-                {% endfor %}
             </div>
-            <div style="margin-top:10px; text-align:right; font-size:0.9rem; opacity:0.7">Simulated: <span id="sim-val">0</span> W</div>
-        </div>
 
-        <!-- PREDICTION CHART -->
-        <div class="col-12 card">
-            <h3 style="margin-top:0">Battery Projection</h3>
-            <div style="height:250px"><canvas id="simChart"></canvas></div>
-        </div>
+            <!-- KEY METRICS -->
+            <div class="col-3 card">
+                <div class="card-title">Solar Generation</div>
+                <div class="metric-val" style="color:var(--warn)">{{ '%0.f'|format(solar) }}<span style="font-size:1.2rem">W</span></div>
+                <div class="metric-unit">Current Input</div>
+            </div>
+            <div class="col-3 card">
+                <div class="card-title">Home Consumption</div>
+                <div class="metric-val" style="color:var(--info)">{{ '%0.f'|format(load) }}<span style="font-size:1.2rem">W</span></div>
+                <div class="metric-unit">Active Load</div>
+            </div>
+            <div class="col-3 card">
+                <div class="card-title">Battery Status</div>
+                <div class="metric-val" style="color:var(--success)">{{ breakdown['total_pct'] }}<span style="font-size:1.2rem">%</span></div>
+                <div class="metric-unit">{{ breakdown['total_kwh'] }} kWh Usable</div>
+            </div>
+            <div class="col-3 card">
+                <div class="card-title">Grid Status</div>
+                <div class="metric-val" style="color:{{ 'var(--crit)' if gen_on else 'var(--text-dim)' }}">{{ 'ON' if gen_on else 'OFF' }}</div>
+                <div class="metric-unit">Generator/Grid</div>
+            </div>
 
-        <!-- BOTTOM STATS -->
-        <div class="col-4 card">
-            <h3 style="margin-top:0">Usable Storage</h3>
-            <div style="height:200px"><canvas id="pieChart"></canvas></div>
-            <center style="margin-top:10px">{{ breakdown.total_pct }}% Filled</center>
-        </div>
-        <div class="col-8 card">
-            <h3 style="margin-top:0">Activity & Alerts</h3>
-            <div style="margin-bottom:15px">
-                {% if detected %}{% for a in detected %}<span class="tag">{{ a }}</span>{% endfor %}{% else %}<span style="opacity:0.5">Idle</span>{% endif %}
+            <!-- 30-DAY HEATMAP -->
+            <div class="col-12 card">
+                <div class="card-title">30-Day Solar Efficiency Calendar</div>
+                <div class="heatmap-container">
+                    <div class="heatmap-grid">
+                        {% for day in heatmap %}
+                        {% set eff_class = 'eff-0' %}
+                        {% if day.efficiency >= 80 %}{% set eff_class = 'eff-5' %}
+                        {% elif day.efficiency >= 60 %}{% set eff_class = 'eff-4' %}
+                        {% elif day.efficiency >= 40 %}{% set eff_class = 'eff-3' %}
+                        {% elif day.efficiency >= 20 %}{% set eff_class = 'eff-2' %}
+                        {% elif day.efficiency > 0 %}{% set eff_class = 'eff-1' %}
+                        {% endif %}
+                        <div class="heatmap-cell {{ eff_class }}" title="{{ day.date }}: {{ day.solar_kwh }}kWh solar, {{ day.consumption_kwh }}kWh used, {{ day.efficiency }}% efficiency">
+                            <div class="heatmap-day">{{ day.day }}</div>
+                            <div class="heatmap-eff">{{ day.efficiency|int }}%</div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    <div class="heatmap-legend">
+                        <div class="legend-item"><div class="legend-box eff-0"></div> No Data</div>
+                        <div class="legend-item"><div class="legend-box eff-1"></div> 0-20%</div>
+                        <div class="legend-item"><div class="legend-box eff-2"></div> 20-40%</div>
+                        <div class="legend-item"><div class="legend-box eff-3"></div> 40-60%</div>
+                        <div class="legend-item"><div class="legend-box eff-4"></div> 60-80%</div>
+                        <div class="legend-item"><div class="legend-box eff-5"></div> 80-100%</div>
+                    </div>
+                </div>
             </div>
-            {% for a in alerts %}
-            <div class="alert-row">
-                <div style="color:{{ 'var(--crit)' if 'crit' in a.type else 'var(--text)' }}">{{ a.subject }}</div>
-                <div class="alert-time">{{ a.timestamp.strftime('%H:%M') }}</div>
+
+            <!-- SCENARIO PLANNER -->
+            <div class="col-12 card">
+                <div class="card-title">Smart Appliance Scheduler</div>
+                <div class="sched-grid">
+                    {% for s in schedule %}
+                    <div class="sched-tile" onclick="toggleSim('{{ s.id }}', {{ s.watts }})" id="btn-{{ s.id }}">
+                        <div class="tile-icon">{{ s.icon }}</div>
+                        <div class="tile-name">{{ s.name }}</div>
+                        <div class="tile-status" style="color: {{ s.color }}">{{ s.msg }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+                <div style="margin-top:15px; text-align:right; font-size:0.9rem; color: var(--text-muted)">
+                    Simulated Additional Load: <span id="sim-val" style="color: var(--accent); font-weight: 700">0W</span>
+                </div>
             </div>
-            {% endfor %}
+
+            <!-- BATTERY PROJECTION -->
+            <div class="col-8 card">
+                <div class="card-title">24-Hour Battery Projection</div>
+                <div style="height:280px"><canvas id="simChart"></canvas></div>
+            </div>
+
+            <!-- STORAGE BREAKDOWN -->
+            <div class="col-4 card">
+                <div class="card-title">Storage Breakdown</div>
+                <div style="height:200px"><canvas id="pieChart"></canvas></div>
+                <div style="text-align:center; margin-top:15px; font-size:1.1rem; color: var(--success); font-weight: 700">
+                    {{ breakdown['total_pct'] }}% Charged
+                </div>
+                <div style="text-align:center; color: var(--text-muted); font-size:0.85rem">
+                    {{ breakdown['total_kwh'] }} kWh Available
+                </div>
+            </div>
+
+            <!-- ACTIVITY & ALERTS -->
+            <div class="col-12 card">
+                <div class="card-title">Current Activity</div>
+                <div style="margin-bottom:20px">
+                    {% if detected %}
+                        {% for a in detected %}
+                        <span class="tag">{{ a }}</span>
+                        {% endfor %}
+                    {% else %}
+                        <span class="tag" style="opacity:0.5">System Idle</span>
+                    {% endif %}
+                </div>
+                <div class="card-title" style="margin-top:20px">Recent Alerts</div>
+                {% if alerts %}
+                    {% for a in alerts %}
+                    <div class="alert-row">
+                        <div style="color:{{ 'var(--crit)' if 'crit' in a.type else 'var(--text)' }}; font-weight: 600;">
+                            {{ a.subject }}
+                        </div>
+                        <div class="alert-time">{{ a.timestamp.strftime('%H:%M') }}</div>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div style="color: var(--text-dim); font-style: italic; padding: 10px 0;">No recent alerts</div>
+                {% endif %}
+            </div>
         </div>
     </div>
 
     <script>
         // Data from Backend
-        const labels = {{ sim.labels|tojson }};
-        const baseData = {{ sim.data|tojson }};
+        const labels = {{ sim['labels']|tojson }};
+        const baseData = {{ sim['data']|tojson }};
         const sForecast = {{ s_fc|tojson }};
         const lForecast = {{ l_fc|tojson }};
-        const pieData = {{ breakdown.chart_data|tojson }};
+        const pieData = {{ breakdown['chart_data']|tojson }};
         
         // Sim State
         let activeSims = {};
+        
+        // Chart.js Global Config
+        Chart.defaults.color = '#94a3b8';
+        Chart.defaults.borderColor = 'rgba(99, 102, 241, 0.2)';
+        Chart.defaults.font.family = "'Manrope', sans-serif";
         
         // --- 1. Simulation Chart ---
         const ctx = document.getElementById('simChart');
@@ -547,47 +1095,123 @@ def home():
                 labels: labels,
                 datasets: [
                     {
-                        label: 'Current Path',
+                        label: 'Current Projection',
                         data: baseData,
-                        borderColor: '#3fb950',
-                        borderWidth: 2,
-                        tension: 0.4,
-                        pointRadius: 0
-                    },
-                    {
-                        label: 'Scenario Path',
-                        data: [],
-                        borderColor: '#ffa500',
-                        borderDash: [5, 5],
-                        borderWidth: 2,
+                        borderColor: '#10b981',
+                        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                        borderWidth: 3,
                         tension: 0.4,
                         pointRadius: 0,
+                        fill: true
+                    },
+                    {
+                        label: 'With Additional Load',
+                        data: [],
+                        borderColor: '#f59e0b',
+                        backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                        borderDash: [5, 5],
+                        borderWidth: 3,
+                        tension: 0.4,
+                        pointRadius: 0,
+                        fill: true,
                         hidden: true
                     }
                 ]
             },
             options: {
-                responsive: true, maintainAspectRatio: false,
+                responsive: true, 
+                maintainAspectRatio: false,
                 interaction: { intersect: false, mode: 'index' },
+                plugins: {
+                    legend: {
+                        labels: {
+                            usePointStyle: true,
+                            padding: 15,
+                            font: { size: 12, weight: '600' }
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                        titleColor: '#e2e8f0',
+                        bodyColor: '#94a3b8',
+                        borderColor: 'rgba(99, 102, 241, 0.3)',
+                        borderWidth: 1,
+                        padding: 12,
+                        displayColors: true,
+                        callbacks: {
+                            label: function(context) {
+                                return context.dataset.label + ': ' + context.parsed.y.toFixed(1) + '%';
+                            }
+                        }
+                    }
+                },
                 scales: { 
-                    y: { min: 0, max: 100, grid: { color: 'rgba(255,255,255,0.1)' } },
-                    x: { grid: { display: false } }
+                    y: { 
+                        min: 0, 
+                        max: 100, 
+                        grid: { color: 'rgba(99, 102, 241, 0.1)' },
+                        ticks: {
+                            callback: function(value) {
+                                return value + '%';
+                            }
+                        }
+                    },
+                    x: { 
+                        grid: { display: false },
+                        ticks: {
+                            maxRotation: 45,
+                            minRotation: 45
+                        }
+                    }
                 }
             }
         });
 
-        // --- 2. Circular Storage Chart ---
+        // --- 2. Storage Pie Chart ---
         new Chart(document.getElementById('pieChart'), {
             type: 'doughnut',
             data: {
-                labels: ['Primary', 'Backup', 'Empty'],
+                labels: ['Primary Battery', 'Backup Battery', 'Empty Capacity'],
                 datasets: [{
                     data: pieData,
-                    backgroundColor: ['#3fb950', '#ffa500', '#333'],
-                    borderWidth: 0
+                    backgroundColor: [
+                        'rgba(16, 185, 129, 0.8)',
+                        'rgba(245, 158, 11, 0.8)',
+                        'rgba(100, 116, 139, 0.3)'
+                    ],
+                    borderWidth: 0,
+                    borderRadius: 4,
+                    spacing: 2
                 }]
             },
-            options: { responsive: true, maintainAspectRatio: false, cutout: '70%', plugins: { legend: { position:'right', labels:{color:'#fff'} } } }
+            options: { 
+                responsive: true, 
+                maintainAspectRatio: false, 
+                cutout: '75%', 
+                plugins: { 
+                    legend: { 
+                        position: 'bottom',
+                        labels: {
+                            padding: 15,
+                            usePointStyle: true,
+                            font: { size: 11, weight: '600' }
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                        titleColor: '#e2e8f0',
+                        bodyColor: '#94a3b8',
+                        borderColor: 'rgba(99, 102, 241, 0.3)',
+                        borderWidth: 1,
+                        padding: 10,
+                        callbacks: {
+                            label: function(context) {
+                                return context.label + ': ' + context.parsed + ' kWh';
+                            }
+                        }
+                    }
+                } 
+            }
         });
 
         // --- 3. Interaction Logic ---
@@ -606,7 +1230,7 @@ def home():
 
         function recalcSimulation() {
             const totalSimWatts = Object.values(activeSims).reduce((a, b) => a + b, 0);
-            document.getElementById('sim-val').innerText = "+" + totalSimWatts;
+            document.getElementById('sim-val').innerText = totalSimWatts + "W";
             
             if (totalSimWatts === 0) {
                 chart.data.datasets[1].hidden = true;
@@ -614,19 +1238,22 @@ def home():
                 return;
             }
 
-            // Simplified JS Physics to update line instantly
+            // Simplified JS Physics
             const BAT_WH = 30000 + (21000 * 0.7); 
             let currentPct = baseData[0] || 0;
             let currentWh = (currentPct / 100) * BAT_WH;
             let simCurve = [];
             
-            for(let i=0; i<labels.length; i++) {
+            for(let i = 0; i < labels.length; i++) {
                 let baseL = (lForecast[i] ? lForecast[i].estimated_load : 1000);
                 let sol = (sForecast[i] ? sForecast[i].estimated_generation : 0);
                 let net = sol - (baseL + totalSimWatts);
                 
-                if(net > 0) currentWh = Math.min(BAT_WH, currentWh + net);
-                else currentWh = Math.max(0, currentWh - Math.abs(net));
+                if(net > 0) {
+                    currentWh = Math.min(BAT_WH, currentWh + net);
+                } else {
+                    currentWh = Math.max(0, currentWh - Math.abs(net));
+                }
                 
                 simCurve.push((currentWh / BAT_WH) * 100);
             }
@@ -636,8 +1263,12 @@ def home():
             chart.update();
         }
         
-        fetch('/health').then(r=>r.json()).then(d=>{ if(!d.polling_thread_alive) fetch('/start-polling'); });
-        setTimeout(()=>location.reload(), 60000);
+        // Health check and auto-refresh
+        fetch('/health').then(r => r.json()).then(d => { 
+            if(!d.polling_thread_alive) fetch('/start-polling'); 
+        });
+        
+        setTimeout(() => location.reload(), 120000); // Refresh every 2 minutes
     </script>
 </body>
 </html>
@@ -646,7 +1277,8 @@ def home():
         d=d, solar=solar, load=load, p_pct=p_pct, b_volt=b_volt, 
         gen_on=gen_on, detected=detected, st_txt=st_txt, st_col=st_col,
         is_charging=is_charging, is_discharging=is_discharging,
-        s_fc=s_fc, l_fc=l_fc, sim=sim, breakdown=breakdown, schedule=schedule
+        s_fc=s_fc, l_fc=l_fc, sim=sim, breakdown=breakdown, schedule=schedule,
+        heatmap=heatmap, alerts=alerts
     )
 
 if __name__ == '__main__':
