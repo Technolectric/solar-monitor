@@ -225,10 +225,6 @@ def generate_smart_schedule(
 ):
     """
     Backward-compatible smart appliance scheduler.
-
-    Works with BOTH:
-    - Old calls (battery_soc_pct only)
-    - New forecast-aware calls
     """
 
     # -----------------------------
@@ -237,9 +233,22 @@ def generate_smart_schedule(
     if battery_kwh_available is None:
         battery_kwh_available = 0
 
+    # FIX: Handle if forecasts are passed as lists (take current hour)
+    current_solar_kw = solar_forecast_kw
+    if isinstance(solar_forecast_kw, list) and len(solar_forecast_kw) > 0:
+        current_solar_kw = solar_forecast_kw[0].get('estimated_generation', 0) / 1000.0
+    elif isinstance(solar_forecast_kw, list):
+        current_solar_kw = 0
+
+    current_load_kw = load_forecast_kw
+    if isinstance(load_forecast_kw, list) and len(load_forecast_kw) > 0:
+        current_load_kw = load_forecast_kw[0].get('estimated_load', 0) / 1000.0
+    elif isinstance(load_forecast_kw, list):
+        current_load_kw = 0
+
     advice = []
 
-    solar_surplus_kw = max(solar_forecast_kw - load_forecast_kw, 0)
+    solar_surplus_kw = max(current_solar_kw - current_load_kw, 0)
     is_daytime = now_hour is None or (7 <= now_hour <= 18)
     battery_soc_floor = 40
 
@@ -320,12 +329,6 @@ def generate_smart_schedule(
 def calculate_battery_breakdown(p_pct, b_volts):
     """
     Calculates breakdown for circular chart with tiered discharge strategy:
-    1. Primary Battery: 100% → 40% (18 kWh usable)
-    2. Backup Battery: 53.0V → 51.2V (16.8 kWh usable, 80% of degraded capacity)
-    3. Emergency Primary: 40% → 20% (6 kWh emergency reserve)
-    
-    Voltage formula for backup: 51.0V = 0%, 53.0V = 100%
-    So: battery_pct = (voltage - 51.0) / 2.0 * 100
     """
     # Backup battery percentage from voltage
     b_pct = max(0, min(100, (b_volts - 51.0) / 2.0 * 100))
@@ -392,9 +395,6 @@ def calculate_battery_breakdown(p_pct, b_volts):
 def calculate_battery_cascade(solar, load, p_pct, b_volts, b_active=False):
     """
     Simulates battery levels over forecast period using tiered discharge:
-    1. Primary 100% → 40% (18 kWh)
-    2. Backup 80% → 20% (based on voltage)
-    3. Emergency Primary 40% → 20% (6 kWh)
     """
     if not solar or not load: return {'labels': [], 'data': []}
     
@@ -484,7 +484,7 @@ latest_data = {
     "generator_running": False, "inverters": [], "detected_appliances": [], 
     "solar_forecast": [], "load_forecast": [], 
     "battery_sim": {"labels": [], "data": []},
-    "energy_breakdown": {"chart_data": [1, 0, 1], "total_pct": 0, "total_kwh": 0},
+    "energy_breakdown": {"chart_data": [1, 0, 1], "total_pct": 0, "total_kwh": 0, "primary_pct": 0, "backup_voltage": 0, "backup_pct": 0},
     "scheduler": [],
     "heatmap_data": [],
     "hourly_24h": []
@@ -550,29 +550,36 @@ def poll_growatt():
             for sn in SERIAL_NUMBERS:
                 try:
                     r = requests.post(API_URL, data={"storage_sn": sn}, headers=headers, timeout=20)
-                    if r.json().get("error_code") == 0:
-                        d = r.json().get("data", {})
-                        op = float(d.get("outPutPower") or 0)
-                        cap = float(d.get("capacity") or 0)
-                        vb = float(d.get("vBat") or 0)
-                        pb = float(d.get("pBat") or 0)
-                        sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
-                        temp = float(d.get("temperature") or 0)
-                        
-                        tot_out += op
-                        tot_sol += sol
-                        if pb > 0: tot_bat += pb
-                        
-                        cfg = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown"})
-                        info = {"SN": sn, "Label": cfg['label'], "OutputPower": op, "Capacity": cap, "vBat": vb, "temp": temp}
-                        inv_data.append(info)
-                        
-                        if cfg['type'] == 'primary': p_caps.append(cap)
-                        elif cfg['type'] == 'backup':
-                            b_data = info
-                            if float(d.get("vac") or 0) > 100 or float(d.get("pAcInPut") or 0) > 50: gen_on = True
+                    if r.status_code == 200:
+                        try:
+                            json_resp = r.json()
+                        except ValueError:
+                            continue # Skip if API returns non-JSON (HTML 502/503)
+
+                        if json_resp.get("error_code") == 0:
+                            d = json_resp.get("data", {})
+                            op = float(d.get("outPutPower") or 0)
+                            cap = float(d.get("capacity") or 0)
+                            vb = float(d.get("vBat") or 0)
+                            pb = float(d.get("pBat") or 0)
+                            sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
+                            temp = float(d.get("temperature") or 0)
+                            
+                            tot_out += op
+                            tot_sol += sol
+                            if pb > 0: tot_bat += pb
+                            
+                            cfg = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown"})
+                            info = {"SN": sn, "Label": cfg['label'], "OutputPower": op, "Capacity": cap, "vBat": vb, "temp": temp}
+                            inv_data.append(info)
+                            
+                            if cfg['type'] == 'primary': p_caps.append(cap)
+                            elif cfg['type'] == 'backup':
+                                b_data = info
+                                if float(d.get("vac") or 0) > 100 or float(d.get("pAcInPut") or 0) > 50: gen_on = True
                 except: pass
 
+            # FIX: Use safety check on min() to prevent crash on empty list
             p_min = min(p_caps) if p_caps else 0
             b_volts = b_data['vBat'] if b_data else 0
             b_act = b_data['OutputPower'] > 50 if b_data else False
@@ -615,7 +622,16 @@ def poll_growatt():
             s_cast = generate_solar_forecast(wx_data)
             sim_res = calculate_battery_cascade(s_cast, l_cast, p_min, b_volts, b_act)
             breakdown = calculate_battery_breakdown(p_min, b_volts)
-            schedule = generate_smart_schedule(p_min, s_cast, l_cast)
+            
+            # FIX: Pass keyword arguments correctly to scheduler to match function definition
+            schedule = generate_smart_schedule(
+                battery_soc_pct=p_min, 
+                battery_kwh_available=breakdown['total_kwh'],
+                solar_forecast_kw=s_cast, 
+                load_forecast_kw=l_cast,
+                now_hour=now.hour
+            )
+            
             heatmap = history_manager.get_last_30_days()
             hourly_24h = history_manager.get_last_24h_data()
             
@@ -651,12 +667,15 @@ def poll_growatt():
 # 5. UI & Routes
 # ----------------------------
 @app.route('/health')
-def health(): return jsonify({"status": "healthy"})
+def health(): 
+    # FIX: Include polling status so frontend auto-starts
+    return jsonify({"status": "healthy", "polling_thread_alive": polling_active})
 
 @app.route('/start-polling')
 def start_polling():
     global polling_active, polling_thread
     if not polling_active:
+        polling_active = True # Set flag immediately
         polling_thread = Thread(target=poll_growatt, daemon=True)
         polling_thread.start()
     return jsonify({"status": "started"})
@@ -1672,6 +1691,3 @@ def home():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
-
-
-
