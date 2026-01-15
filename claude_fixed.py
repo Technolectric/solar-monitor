@@ -67,7 +67,7 @@ class ApplianceDetector:
         
         # Known appliance signatures (watts)
         self.APPLIANCE_SIGNATURES = {
-            'airbnb1': {
+            'house1': {
                 'idle': (0, 100),
                 'lights_tv': (400, 1000),
                 'pool_pump': (1000, 1350),
@@ -76,7 +76,7 @@ class ApplianceDetector:
                 'water_heater': (3000, 5000),
                 'ac_unit': (1500, 3500)
             },
-            'airbnb2': {
+            'house2': {
                 'idle': (0, 100),
                 'lights_tv': (400, 1000),
                 'pool_pump': (1000, 1350),
@@ -158,8 +158,8 @@ class ApplianceDetector:
     
     def detect_houses(self, current_load, historical_data=None):
         """
-        Detect which Airbnb house is active using clustering.
-        Returns: {'airbnb1': bool, 'airbnb2': bool, 'confidence': float}
+        Detect which house is active using clustering.
+        Returns: {'house1': bool, 'house2': bool, 'confidence': float}
         """
         try:
             # Add current load to history
@@ -171,7 +171,7 @@ class ApplianceDetector:
             
             # Need enough data for clustering
             if len(self.load_history) < 20:
-                return {'airbnb1': True, 'airbnb2': False, 'confidence': 0.5}
+                return {'house1': True, 'house2': False, 'confidence': 0.5}
             
             # Prepare data for clustering
             load_values = [item['load'] for item in self.load_history]
@@ -212,21 +212,21 @@ class ApplianceDetector:
                         is_dual = load_variation > 800 and current_load > 1500
                         
                         if is_dual:
-                            return {'airbnb1': True, 'airbnb2': True, 'confidence': 0.7}
+                            return {'house1': True, 'house2': True, 'confidence': 0.7}
                         else:
                             # Single house occupied
-                            return {'airbnb1': True, 'airbnb2': False, 'confidence': 0.8}
+                            return {'house1': True, 'house2': False, 'confidence': 0.8}
                     else:
-                        return {'airbnb1': False, 'airbnb2': False, 'confidence': 0.9}
+                        return {'house1': False, 'house2': False, 'confidence': 0.9}
                         
                 except Exception as e:
                     print(f"⚠️ Clustering error: {e}")
             
-            return {'airbnb1': current_load > 300, 'airbnb2': False, 'confidence': 0.6}
+            return {'house1': current_load > 300, 'house2': False, 'confidence': 0.6}
             
         except Exception as e:
             print(f"⚠️ House detection error: {e}")
-            return {'airbnb1': current_load > 300, 'airbnb2': False, 'confidence': 0.5}
+            return {'house1': current_load > 300, 'house2': False, 'confidence': 0.5}
     
     def detect_appliances(self, current_load, previous_load, house_status):
         """
@@ -235,7 +235,7 @@ class ApplianceDetector:
         """
         try:
             delta = current_load - previous_load
-            detected = {'airbnb1': [], 'airbnb2': []}
+            detected = {'house1': [], 'house2': []}
             
             # Extract features for classification
             recent_loads = [item['load'] for item in list(self.load_history)[-self.feature_window:]]
@@ -243,20 +243,20 @@ class ApplianceDetector:
             
             # Simple rule-based detection with ML enhancement
             if current_load < 200:
-                for house in ['airbnb1', 'airbnb2']:
+                for house in ['house1', 'house2']:
                     if house_status.get(house, False):
                         detected[house].append("Idle")
             
             else:
                 # Check for appliance signatures
-                for house in ['airbnb1', 'airbnb2']:
+                for house in ['house1', 'house2']:
                     if not house_status.get(house, False):
                         continue
                     
                     # Estimate load allocation between houses
                     # Simple heuristic: if only one house occupied, all load goes there
                     # If both occupied, split based on typical patterns
-                    if house_status.get('airbnb1', False) and house_status.get('airbnb2', False):
+                    if house_status.get('house1', False) and house_status.get('house2', False):
                         # Both occupied - try to allocate load
                         house_load = current_load / 2  # Simple split
                     else:
@@ -291,7 +291,7 @@ class ApplianceDetector:
             
         except Exception as e:
             print(f"⚠️ Appliance detection error: {e}")
-            return {'airbnb1': ["System Error"], 'airbnb2': []}
+            return {'house1': ["System Error"], 'house2': []}
     
     def train_from_feedback(self, feedback_data):
         """
@@ -443,7 +443,7 @@ history_manager = DailyHistoryManager(HISTORY_FILE)
 
 def identify_active_appliances(current, previous, gen_active, backup_volts, primary_pct):
     """
-    Enhanced detection using ML for two Airbnb houses
+    Enhanced detection using ML for two houses
     """
     detected = []
     delta = current - previous
@@ -461,14 +461,14 @@ def identify_active_appliances(current, previous, gen_active, backup_volts, prim
     
     # Format detection results
     for house, status in house_status.items():
-        if status and house in ['airbnb1', 'airbnb2']:
-            house_name = "Airbnb 1" if house == 'airbnb1' else "Airbnb 2"
+        if status and house in ['house1', 'house2']:
+            house_name = "House 1" if house == 'house1' else "House 2"
             detected.append(f"{house_name} Occupied")
     
     # Add detected appliances
     for house, appliances in appliance_detection.items():
         if appliances:
-            house_name = "Airbnb 1" if house == 'airbnb1' else "Airbnb 2"
+            house_name = "House 1" if house == 'house1' else "House 2"
             for appliance in appliances:
                 if appliance != "Unknown Load":
                     detected.append(f"{house_name}: {appliance}")
@@ -808,7 +808,7 @@ latest_data = {
     "scheduler": [],
     "heatmap_data": [],
     "hourly_24h": [],
-    "house_occupancy": {"airbnb1": False, "airbnb2": False, "confidence": 0},
+    "house_occupancy": {"house1": False, "house2": False, "confidence": 0},
     "ml_status": "Initializing"
 }
 
@@ -1173,7 +1173,7 @@ def poll_growatt():
             }
             
             # Log ML insights
-            ml_insight = f"ML: Houses - Airbnb1:{house_status.get('airbnb1', False)} Airbnb2:{house_status.get('airbnb2', False)} Conf:{house_status.get('confidence', 0):.1f}"
+            ml_insight = f"ML: Houses - House1:{house_status.get('house1', False)} House2:{house_status.get('house2', False)} Conf:{house_status.get('confidence', 0):.1f}"
             print(f"Update: Load={tot_out}W, Battery={breakdown['total_pct']}% | {ml_insight}")
 
         except Exception as e: 
@@ -1237,8 +1237,8 @@ def home():
     b_volt = _n("backup_battery_voltage")
     gen_on = d.get("generator_running", False)
     detected = d.get("detected_appliances", [])
-    house_occupancy = d.get("house_occupancy", {"airbnb1": False, "airbnb2": False, "confidence": 0})
-    heavy_loads_safe = d.get("heavy_loads_safe", False)  # Get from latest_data
+    house_occupancy = d.get("house_occupancy", {"house1": False, "house2": False, "confidence": 0})
+    heavy_loads_safe = d.get("heavy_loads_safe", False)
 
     breakdown = d.get("energy_breakdown") or {
         "chart_data": [1,0,1], 
@@ -1362,18 +1362,18 @@ def home():
     schedule_blocks_heavy = any('No Safe Solar' in item.get('title', '') for item in schedule_items)
     
     # ML Enhanced: Consider house occupancy in recommendations
-    airbnb1_occupied = house_occupancy.get('airbnb1', False)
-    airbnb2_occupied = house_occupancy.get('airbnb2', False)
+    house1_occupied = house_occupancy.get('house1', False)
+    house2_occupied = house_occupancy.get('house2', False)
     occupancy_confidence = house_occupancy.get('confidence', 0)
     
     occupancy_status = []
-    if airbnb1_occupied:
-        occupancy_status.append("Airbnb 1")
-    if airbnb2_occupied:
-        occupancy_status.append("Airbnb 2")
+    if house1_occupied:
+        occupancy_status.append("House 1")
+    if house2_occupied:
+        occupancy_status.append("House 2")
     
     occupancy_text = ", ".join(occupancy_status) if occupancy_status else "No houses"
-    ml_info = f"ML Detection ({occupancy_confidence:.0%} confidence): {occupancy_text}"
+    ml_info = f"House Detection ({occupancy_confidence:.0%} confidence): {occupancy_text}"
     
     if gen_on:
         recommendation_items.append({
@@ -1435,23 +1435,23 @@ def home():
             'class': 'warning'
         })
 
-    # Add ML Status Card
-    ml_status_card = {
-        'icon': '🤖',
-        'title': 'ML Detection Status',
-        'description': f'Airbnb 1: {"Occupied" if airbnb1_occupied else "Vacant"}, Airbnb 2: {"Occupied" if airbnb2_occupied else "Vacant"} | Confidence: {occupancy_confidence:.0%}',
+    # Add House Status Card
+    house_status_card = {
+        'icon': '🏠',
+        'title': 'House Detection Status',
+        'description': f'House 1: {"Occupied" if house1_occupied else "Vacant"}, House 2: {"Occupied" if house2_occupied else "Vacant"} | Confidence: {occupancy_confidence:.0%}',
         'class': 'info'
     }
-    recommendation_items.insert(0, ml_status_card)
+    recommendation_items.insert(0, house_status_card)
 
-    # Now render the template (keeping the HTML template exactly as before)
+    # HTML Template
     html = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Solar Monitor Pro - ML Enhanced</title>
+    <title>Solar Monitor Pro - Dual House</title>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Manrope:wght@400;600;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
@@ -1463,7 +1463,7 @@ def home():
             --success: #10b981; --warn: #f59e0b; --crit: #ef4444; --info: #3b82f6;
             --accent: #6366f1; --accent-glow: rgba(99, 102, 241, 0.3);
             --primary-color: #10b981; --backup-color: #3b82f6; --reserve-color: #f59e0b;
-            --ml-color: #8b5cf6; --airbnb1-color: #10b981; --airbnb2-color: #3b82f6;
+            --house1-color: #10b981; --house2-color: #3b82f6;
         }
         
         * { box-sizing: border-box; }
@@ -1473,7 +1473,7 @@ def home():
             background-image: 
                 radial-gradient(ellipse at top, rgba(99, 102, 241, 0.15) 0%, transparent 50%),
                 radial-gradient(ellipse at bottom right, rgba(245, 158, 11, 0.1) 0%, transparent 50%),
-                radial-gradient(ellipse at top left, rgba(139, 92, 246, 0.1) 0%, transparent 50%);
+                radial-gradient(ellipse at top left, rgba(59, 130, 246, 0.1) 0%, transparent 50%);
             color: var(--text); 
             font-family: 'Manrope', sans-serif; 
             margin: 0; 
@@ -1499,7 +1499,7 @@ def home():
             margin: 0; 
             font-size: 1.8rem; 
             font-weight: 800;
-            background: linear-gradient(135deg, var(--accent) 0%, var(--ml-color) 100%);
+            background: linear-gradient(135deg, var(--accent) 0%, var(--house1-color) 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             letter-spacing: -0.5px;
@@ -1567,7 +1567,7 @@ def home():
             left: 0;
             right: 0;
             height: 3px;
-            background: linear-gradient(135deg, var(--accent) 0%, var(--ml-color) 100%);
+            background: linear-gradient(135deg, var(--accent) 0%, var(--house1-color) 100%);
             opacity: 0;
             transition: opacity 0.3s;
         }
@@ -1621,9 +1621,8 @@ def home():
             transition: all 0.2s;
         }
         
-        .tag.airbnb1 { background: rgba(16, 185, 129, 0.15); border-color: var(--airbnb1-color); }
-        .tag.airbnb2 { background: rgba(59, 130, 246, 0.15); border-color: var(--airbnb2-color); }
-        .tag.ml { background: rgba(139, 92, 246, 0.15); border-color: var(--ml-color); }
+        .tag.house1 { background: rgba(16, 185, 129, 0.15); border-color: var(--house1-color); }
+        .tag.house2 { background: rgba(59, 130, 246, 0.15); border-color: var(--house2-color); }
         
         .tag:hover {
             background: rgba(99, 102, 241, 0.25);
@@ -1675,7 +1674,6 @@ def home():
         .n-home  { top: 50%; right: 12%; transform: translateY(-50%); border-color: var(--success); }
         .n-bat   { bottom: 15px; left: 50%; transform: translateX(-50%); border-color: var(--success); }
         .n-gen   { top: 50%; left: 12%; transform: translateY(-50%); border-color: var(--crit); }
-        .n-ml    { bottom: 15px; right: 15%; transform: translateY(-50%); width: 80px; height: 80px; border-color: var(--ml-color); }
         
         .line { position: absolute; background: var(--border); z-index: 1; overflow: hidden; border-radius: 2px; }
         .line-v { width: 5px; height: 85px; left: 50%; transform: translateX(-50%); }
@@ -1684,7 +1682,6 @@ def home():
         .line-h { height: 5px; width: 28%; top: 50%; transform: translateY(-50%); }
         .l-gen { left: 18%; } 
         .l-home { right: 18%; }
-        .l-ml { height: 5px; width: 15%; bottom: 105px; right: 18%; transform: rotate(45deg); }
         
         .dot { 
             position: absolute; 
@@ -1707,7 +1704,6 @@ def home():
         .pulse-g { animation: pulse-green 2s infinite; } 
         .pulse-r { animation: pulse-red 2s infinite; } 
         .pulse-y { animation: pulse-yellow 2s infinite; }
-        .pulse-ml { animation: pulse-ml 2s infinite; }
         
         @keyframes pulse-green { 
             0%{box-shadow:0 0 0 0 rgba(16, 185, 129, 0.7)} 
@@ -1723,11 +1719,6 @@ def home():
             0%{box-shadow:0 0 0 0 rgba(245, 158, 11, 0.7)} 
             70%{box-shadow:0 0 0 20px rgba(245, 158, 11, 0)} 
             100%{box-shadow:0 0 0 0 rgba(245, 158, 11, 0)} 
-        }
-        @keyframes pulse-ml { 
-            0%{box-shadow:0 0 0 0 rgba(139, 92, 246, 0.7)} 
-            70%{box-shadow:0 0 0 20px rgba(139, 92, 246, 0)} 
-            100%{box-shadow:0 0 0 0 rgba(139, 92, 246, 0)} 
         }
 
         /* Enhanced Scheduler */
@@ -1809,7 +1800,6 @@ def home():
         .rec-item.warning { border-left-color: var(--warn); }
         .rec-item.good { border-left-color: var(--success); }
         .rec-item.info { border-left-color: var(--info); }
-        .rec-item.ml { border-left-color: var(--ml-color); }
         
         .rec-icon { font-size: 1.5rem; }
         .rec-title { font-weight: 600; margin-bottom: 0.25rem; }
@@ -1920,8 +1910,8 @@ def home():
             text-align: center;
         }
         
-        .house-card.airbnb1 { border-color: var(--airbnb1-color); }
-        .house-card.airbnb2 { border-color: var(--airbnb2-color); }
+        .house-card.house1 { border-color: var(--house1-color); }
+        .house-card.house2 { border-color: var(--house2-color); }
         
         .house-card.active {
             background: rgba(16, 185, 129, 0.1);
@@ -1944,7 +1934,7 @@ def home():
         
         .house-status-occupied {
             background: rgba(16, 185, 129, 0.2);
-            color: var(--airbnb1-color);
+            color: var(--house1-color);
         }
         
         .house-status-vacant {
@@ -2001,7 +1991,7 @@ def home():
     <div class="container">
         <div class="header">
             <div>
-                <h1>🤖 SOLAR MONITOR PRO - ML ENHANCED</h1>
+                <h1>🏠 SOLAR MONITOR PRO - DUAL HOUSE</h1>
                 <span class="status-badge" style="border-color: {{ st_col }}; color: {{ st_col }}">{{ st_txt }}</span>
             </div>
             <div class="time-display">{{ d['timestamp'] }}</div>
@@ -2010,13 +2000,12 @@ def home():
         <div class="grid">
             <!-- VISUAL POWER FLOW -->
             <div class="col-12 card">
-                <div class="card-title">Real-Time Energy Flow with ML Detection</div>
+                <div class="card-title">Real-Time Energy Flow</div>
                 <div class="flow-diagram">
                     <div class="line line-v l-solar {{ 'flow-down' if solar > 50 else '' }}"><div class="dot"></div></div>
                     <div class="line line-v l-bat {{ 'flow-down' if is_charging else ('flow-up' if is_discharging else '') }}"><div class="dot"></div></div>
                     <div class="line line-h l-home {{ 'flow-right' if load > 100 else '' }}"><div class="dot"></div></div>
                     <div class="line line-h l-gen {{ 'flow-right' if gen_on else '' }}"><div class="dot"></div></div>
-                    <div class="line l-ml {{ 'flow-right' if house_occupancy.airbnb1 or house_occupancy.airbnb2 else '' }}"><div class="dot"></div></div>
                     
                     <div class="node n-solar {{ 'pulse-y' if solar > 50 else '' }}">
                         <div class="node-icon">☀️</div>
@@ -2038,25 +2027,21 @@ def home():
                         <div class="node-icon">🔋</div>
                         <div class="node-val">{{ breakdown['total_pct'] }}%</div>
                     </div>
-                    <div class="node n-ml {{ 'pulse-ml' if house_occupancy.airbnb1 or house_occupancy.airbnb2 else '' }}">
-                        <div class="node-icon">🤖</div>
-                        <div class="node-val">ML</div>
-                    </div>
                 </div>
                 
                 <!-- House Status Display -->
                 <div class="house-status">
-                    <div class="house-card airbnb1 {{ 'active' if house_occupancy.airbnb1 else '' }}">
-                        <div class="house-name">🏠 Airbnb 1</div>
-                        <div class="house-status-indicator {{ 'house-status-occupied' if house_occupancy.airbnb1 else 'house-status-vacant' }}">
-                            {{ 'Occupied' if house_occupancy.airbnb1 else 'Vacant' }}
+                    <div class="house-card house1 {{ 'active' if house_occupancy.house1 else '' }}">
+                        <div class="house-name">🏠 House 1</div>
+                        <div class="house-status-indicator {{ 'house-status-occupied' if house_occupancy.house1 else 'house-status-vacant' }}">
+                            {{ 'Occupied' if house_occupancy.house1 else 'Vacant' }}
                         </div>
                         <div class="ml-confidence">Confidence: {{ (house_occupancy.confidence * 100)|int }}%</div>
                     </div>
-                    <div class="house-card airbnb2 {{ 'active' if house_occupancy.airbnb2 else '' }}">
-                        <div class="house-name">🏠 Airbnb 2</div>
-                        <div class="house-status-indicator {{ 'house-status-occupied' if house_occupancy.airbnb2 else 'house-status-vacant' }}">
-                            {{ 'Occupied' if house_occupancy.airbnb2 else 'Vacant' }}
+                    <div class="house-card house2 {{ 'active' if house_occupancy.house2 else '' }}">
+                        <div class="house-name">🏠 House 2</div>
+                        <div class="house-status-indicator {{ 'house-status-occupied' if house_occupancy.house2 else 'house-status-vacant' }}">
+                            {{ 'Occupied' if house_occupancy.house2 else 'Vacant' }}
                         </div>
                         <div class="ml-confidence">Confidence: {{ (house_occupancy.confidence * 100)|int }}%</div>
                     </div>
@@ -2080,8 +2065,8 @@ def home():
                 <div class="metric-unit">{{ breakdown['total_kwh'] }} kWh Usable</div>
             </div>
             <div class="col-3 card">
-                <div class="card-title">ML Detection</div>
-                <div class="metric-val" style="color:var(--ml-color)">{{ (house_occupancy.confidence * 100)|int }}<span style="font-size:1.2rem">%</span></div>
+                <div class="card-title">House Detection</div>
+                <div class="metric-val" style="color:var(--info)">{{ (house_occupancy.confidence * 100)|int }}<span style="font-size:1.2rem">%</span></div>
                 <div class="metric-unit">Confidence Level</div>
             </div>
 
@@ -2134,7 +2119,7 @@ def home():
 
             <!-- RECOMMENDATIONS -->
             <div class="col-6 card">
-                <div class="card-title">📝 ML-Enhanced Recommendations</div>
+                <div class="card-title">📝 House Detection Recommendations</div>
                 {% for rec in recommendation_items %}
                 <div class="rec-item {{ rec.class }}">
                     <div class="rec-icon">{{ rec.icon }}</div>
@@ -2147,7 +2132,7 @@ def home():
                 
                 <!-- ML Feedback Section -->
                 <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--border);">
-                    <div class="card-title" style="margin-bottom: 10px;">🤖 ML Feedback</div>
+                    <div class="card-title" style="margin-bottom: 10px;">🏠 House Detection Feedback</div>
                     <div style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 10px;">
                         Help improve detection accuracy by providing feedback:
                     </div>
@@ -2212,14 +2197,14 @@ def home():
 
             <!-- ACTIVITY & ALERTS -->
             <div class="col-12 card">
-                <div class="card-title">ML-Enhanced Activity Detection</div>
+                <div class="card-title">House Activity Detection</div>
                 <div style="margin-bottom:20px">
                     {% if detected %}
                         {% for a in detected %}
-                            {% if 'Airbnb 1' in a %}
-                                <span class="tag airbnb1">🏠 {{ a }}</span>
-                            {% elif 'Airbnb 2' in a %}
-                                <span class="tag airbnb2">🏠 {{ a }}</span>
+                            {% if 'House 1' in a %}
+                                <span class="tag house1">🏠 {{ a }}</span>
+                            {% elif 'House 2' in a %}
+                                <span class="tag house2">🏠 {{ a }}</span>
                             {% elif 'Water' in a or 'Generator' in a %}
                                 <span class="tag" style="background: rgba(239, 68, 68, 0.15); border-color: var(--crit);">⚠️ {{ a }}</span>
                             {% else %}
@@ -2258,7 +2243,11 @@ def home():
         const pieData = {{ breakdown['chart_data']|tojson }};
         const tierLabels = {{ tier_labels|tojson }};
         const hourly24h = {{ hourly_24h|tojson }};
-        const houseOccupancy = {{ house_occupancy|tojson }};
+        const houseOccupancy = {
+            house1: {{ house_occupancy.house1|tojson }},
+            house2: {{ house_occupancy.house2|tojson }},
+            confidence: {{ house_occupancy.confidence|tojson }}
+        };
         
         // Sim State
         let activeSims = {};
@@ -2754,7 +2743,7 @@ def home():
                     
                     // Visual feedback
                     document.querySelector('.feedback-btn:nth-child(3)').style.transform = 'scale(1.1)';
-                    document.querySelector('.feedback-btn:nth-child(3)').style.boxShadow = '0 0 20px var(--ml-color)';
+                    document.querySelector('.feedback-btn:nth-child(3)').style.boxShadow = '0 0 20px var(--info)';
                     
                     // Reset after 3 seconds
                     setTimeout(() => {
