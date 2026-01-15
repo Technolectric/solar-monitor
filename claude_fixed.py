@@ -542,112 +542,129 @@ def get_energy_status(p_pct, b_volts):
         'active_tier': active_tier
     }
 
-def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now_hour=None):
-    """Smart appliance scheduler - coordinated with recommendations."""
+def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now_hour=None, 
+                           heavy_loads_safe=False, gen_on=False, b_active=False):
+    """Smart appliance scheduler - properly coordinated with recommendations."""
     battery_kwh_available = status['total_available_wh'] / 1000
-    battery_soc_pct = status['total_pct']  # Use total system availability
-    
-    # Get primary battery percentage from status
+    battery_soc_pct = status['total_pct']
     primary_pct = status.get('primary_battery_pct', 0)
-
-    current_solar_kw = solar_forecast_kw
-    if isinstance(solar_forecast_kw, list) and len(solar_forecast_kw) > 0:
-        current_solar_kw = solar_forecast_kw[0].get('estimated_generation', 0) / 1000.0
-    elif isinstance(solar_forecast_kw, list):
-        current_solar_kw = 0
-
-    current_load_kw = load_forecast_kw
-    if isinstance(load_forecast_kw, list) and len(load_forecast_kw) > 0:
-        current_load_kw = load_forecast_kw[0].get('estimated_load', 0) / 1000.0
-    elif isinstance(load_forecast_kw, list):
-        current_load_kw = 0
-
+    
+    now = datetime.now(EAT)
+    current_hour = now_hour if now_hour is not None else now.hour
+    is_night = current_hour < 7 or current_hour >= 18
+    is_past_4pm = current_hour >= 16
+    
     advice = []
-    solar_surplus_kw = max(current_solar_kw - current_load_kw, 0)
-    is_daytime = now_hour is None or (7 <= now_hour <= 18)
     
     for app in APPLIANCE_PROFILES:
         app_kw = app["watts"] / 1000
         app_kwh_required = (app["watts"] * app["hours"]) / 1000
-
+        
+        # Default to unsafe
         decision = {"msg": "Wait", "status": "unsafe", "color": "var(--warn)", "reason": ""}
-
-        # CRITICAL: Check battery level first
-        if battery_soc_pct < 40:
+        
+        # ABSOLUTE BLOCKERS (same as recommendations)
+        if gen_on:
+            decision.update({
+                "msg": "Generator On", 
+                "status": "unsafe",
+                "color": "var(--crit)",
+                "reason": "Generator running - no loads"
+            })
+        elif b_active:
+            decision.update({
+                "msg": "Backup Active", 
+                "status": "unsafe",
+                "color": "var(--crit)",
+                "reason": "Backup battery in use"
+            })
+        elif battery_soc_pct < 40:
             decision.update({
                 "msg": "Battery Too Low", 
+                "status": "unsafe",
+                "color": "var(--crit)",
                 "reason": f"System at {battery_soc_pct:.0f}%"
             })
-        # Check if primary is too low for ANY loads
-        elif primary_pct <= 75:
-            decision.update({
-                "msg": "Primary Too Low", 
-                "status": "unsafe",
-                "color": "var(--warn)",
-                "reason": f"Primary {primary_pct:.0f}% - wait for charging"
-            })
         
-        # Heavy Loads (>1500W) - STRICTER RULES
+        # Heavy Loads (>1500W) - STRICT RULES
         elif app["watts"] > 1500:
-            # Rule 1: NEVER at night
-            if not is_daytime:
+            if is_night or is_past_4pm:
                 decision.update({
-                    "msg": "Daytime Only", 
+                    "msg": "Not Safe", 
                     "status": "unsafe",
                     "color": "var(--crit)",
-                    "reason": "Heavy loads not safe at night"
+                    "reason": "Heavy loads restricted: nighttime or after 4 PM"
                 })
-            # Rule 2: Safe if current solar is enough
-            elif solar_surplus_kw >= app_kw:
-                 decision.update({
-                    "msg": "Safe to Run (Solar)", 
+            elif heavy_loads_safe:
+                decision.update({
+                    "msg": "Safe in Window", 
                     "status": "safe", 
                     "color": "var(--success)", 
-                    "reason": f"Solar surplus {solar_surplus_kw:.1f} kW"
+                    "reason": "Inside calculated safe solar window"
                 })
-            # Rule 3: If no solar, require HIGHER battery (85%)
             elif primary_pct > 85 and battery_kwh_available >= app_kwh_required * 1.5:
                 decision.update({
-                    "msg": "Safe to Run (Battery)", 
+                    "msg": "Safe (High Battery)", 
                     "status": "safe", 
                     "color": "var(--success)", 
-                    "reason": f"Primary {primary_pct:.0f}% > 85%, Battery Good"
+                    "reason": f"Primary {primary_pct:.0f}% > 85%"
                 })
             else:
                 decision.update({
-                    "msg": "Wait for Solar", 
+                    "msg": "Wait for Window", 
                     "status": "unsafe",
                     "color": "var(--warn)",
-                    "reason": "Need active solar or >85% battery"
+                    "reason": "Need solar window or >85% battery"
                 })
-
-        # Moderate Loads - Existing Logic
-        elif solar_surplus_kw >= app_kw and is_daytime:
-            decision.update({
-                "msg": "Safe to Run (Solar)", 
-                "status": "safe", 
-                "color": "var(--success)", 
-                "reason": f"Solar surplus {solar_surplus_kw:.1f} kW"
-            })
-        # For moderate loads, allow if battery is sufficient
-        elif primary_pct > 75 and battery_kwh_available >= app_kwh_required * 1.3 and battery_soc_pct >= 60:
-            decision.update({
-                "msg": "Safe to Run (Battery)", 
-                "status": "safe", 
-                "color": "var(--success)", 
-                "reason": f"Battery {battery_kwh_available:.1f} kWh available"
-            })
-        elif is_daytime:
-            decision.update({
-                "msg": "Wait for More Solar", 
-                "reason": f"Surplus {solar_surplus_kw:.1f} kW < {app_kw:.1f} kW needed"
-            })
+        
+        # Moderate Loads (800-1500W)
+        elif app["watts"] >= 800:
+            if is_night and battery_soc_pct < 60:
+                decision.update({
+                    "msg": "Avoid at Night", 
+                    "status": "unsafe",
+                    "color": "var(--warn)",
+                    "reason": "Night + battery < 60%"
+                })
+            elif heavy_loads_safe or primary_pct > 75:
+                decision.update({
+                    "msg": "Conditionally Safe", 
+                    "status": "safe", 
+                    "color": "var(--success)", 
+                    "reason": "Good conditions"
+                })
+            else:
+                decision.update({
+                    "msg": "Wait", 
+                    "status": "unsafe",
+                    "color": "var(--warn)",
+                    "reason": "Conditions not optimal"
+                })
+        
+        # Light Loads (<800W)
         else:
-            decision.update({
-                "msg": "Avoid Night Use", 
-                "reason": "Nighttime battery preservation"
-            })
-
+            if is_night and battery_soc_pct < 50:
+                decision.update({
+                    "msg": "Conserve", 
+                    "status": "unsafe",
+                    "color": "var(--warn)",
+                    "reason": "Night + low battery"
+                })
+            elif battery_kwh_available >= app_kwh_required * 1.2:
+                decision.update({
+                    "msg": "Safe to Run", 
+                    "status": "safe", 
+                    "color": "var(--success)", 
+                    "reason": "Battery sufficient"
+                })
+            else:
+                decision.update({
+                    "msg": "Wait", 
+                    "status": "unsafe",
+                    "color": "var(--warn)",
+                    "reason": "Insufficient battery"
+                })
+        
         advice.append({
             **app, 
             "required_kwh": round(app_kwh_required, 2), 
@@ -656,7 +673,7 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
             "color": decision["color"], 
             "reason": decision["reason"]
         })
-
+    
     return advice
 
 def calculate_battery_breakdown(p_pct, b_volts):
@@ -1067,11 +1084,62 @@ def poll_growatt():
             breakdown = calculate_battery_breakdown(p_min, b_volts)
             sim_res = calculate_battery_cascade(s_cast, l_cast, p_min, b_volts)
 
+            # Calculate safe window for scheduler (same logic as home() route)
+            heavy_loads_safe = False
+            if s_cast and l_cast:
+                best_start, best_end, current_run = None, None, 0
+                temp_start = None
+                limit = min(len(s_cast), len(l_cast))
+                
+                for i in range(limit):
+                    s_item = s_cast[i]
+                    l_item = l_cast[i]
+                    t = s_item['time']
+                    
+                    if t.hour >= 16:
+                        if current_run > 0:
+                            if best_start is None or current_run > ((best_end - best_start).total_seconds() // 3600 if best_end else 0):
+                                best_start = temp_start
+                                best_end = t
+                            current_run = 0
+                        continue
+                    
+                    gen = s_item['estimated_generation']
+                    base_load = l_item.get('estimated_load', 600)
+                    net_surplus = gen - base_load
+                    
+                    if net_surplus > 2500:
+                        if current_run == 0: 
+                            temp_start = t
+                        current_run += 1
+                    else:
+                        if current_run > 0:
+                            current_duration = (t - temp_start).total_seconds()
+                            previous_duration = (best_end - best_start).total_seconds() if best_start and best_end else 0
+                            
+                            if best_start is None or current_duration > previous_duration:
+                                best_start = temp_start
+                                best_end = t
+                            current_run = 0
+                
+                if current_run > 0:
+                    if best_start is None or current_run > ((best_end - best_start).total_seconds() // 3600 if best_end else 0):
+                        best_start = temp_start
+                        best_end = s_cast[limit-1]['time'] + timedelta(hours=1)
+                
+                if best_start and best_end:
+                    if best_start <= now <= best_end:
+                        heavy_loads_safe = True
+
+            # Generate schedule with proper context
             schedule = generate_smart_schedule(
                 status=breakdown['status_obj'],
                 solar_forecast_kw=s_cast, 
                 load_forecast_kw=l_cast,
-                now_hour=now.hour
+                now_hour=now.hour,
+                heavy_loads_safe=heavy_loads_safe,
+                gen_on=gen_on,
+                b_active=b_act
             )
 
             # Remove status_obj before sending to frontend
@@ -1100,7 +1168,8 @@ def poll_growatt():
                 "heatmap_data": heatmap,
                 "hourly_24h": hourly_24h,
                 "house_occupancy": house_status,
-                "ml_status": "Active"
+                "ml_status": "Active",
+                "heavy_loads_safe": heavy_loads_safe  # Add this for consistency
             }
             
             # Log ML insights
@@ -1169,6 +1238,7 @@ def home():
     gen_on = d.get("generator_running", False)
     detected = d.get("detected_appliances", [])
     house_occupancy = d.get("house_occupancy", {"airbnb1": False, "airbnb2": False, "confidence": 0})
+    heavy_loads_safe = d.get("heavy_loads_safe", False)  # Get from latest_data
 
     breakdown = d.get("energy_breakdown") or {
         "chart_data": [1,0,1], 
@@ -1210,7 +1280,6 @@ def home():
     
     # --- 1. Calculate Safe Heavy Load Window (Schedule) ---
     schedule_items = []
-    heavy_loads_safe = False
     
     if s_fc and l_fc:
         best_start, best_end, current_run = None, None, 0
@@ -1268,9 +1337,6 @@ def home():
                 'time': f"{best_start.strftime('%I:%M %p').lstrip('0')} - {best_end.strftime('%I:%M %p').lstrip('0')}",
                 'class': 'good'
             })
-            # Check if NOW is within the calculated safe window
-            if best_start <= now <= best_end:
-                heavy_loads_safe = True
         else:
             schedule_items.append({
                 'icon': '☁️',
@@ -1378,6 +1444,7 @@ def home():
     }
     recommendation_items.insert(0, ml_status_card)
 
+    # Now render the template (keeping the HTML template exactly as before)
     html = """
 <!DOCTYPE html>
 <html lang="en">
@@ -2127,8 +2194,7 @@ def home():
                     {{ breakdown['total_pct'] }}% Available
                 </div>
                 <div style="text-align:center; color: var(--text-muted); font-size:0.85rem">
-                    {{ breakdown['total_kwh'] }} kWh Usable
-                </div>
+                    {{ breakdown['total_kwh'] }} kWh Usable</div>
                 <div style="margin-top:10px; padding-top:10px; border-top: 1px solid var(--border); font-size:0.75rem; color: var(--text-dim)">
                     <div>Primary: {{ primary_pct }}%</div>
                     <div>Backup: {{ backup_voltage }}V ({{ backup_pct }}%)</div>
@@ -2726,7 +2792,7 @@ def home():
         tier_labels=tier_labels, primary_pct=primary_pct, 
         backup_voltage=backup_voltage, backup_pct=backup_pct,
         recommendation_items=recommendation_items, schedule_items=schedule_items,
-        house_occupancy=house_occupancy
+        house_occupancy=house_occupancy, heavy_loads_safe=heavy_loads_safe
     )
 
 if __name__ == '__main__':
