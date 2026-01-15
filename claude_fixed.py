@@ -295,7 +295,42 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
                 "color": "var(--warn)",
                 "reason": f"Primary {primary_pct:.0f}% - wait for charging"
             })
-        # Check solar surplus (best case)
+        
+        # Heavy Loads (>1500W) - STRICTER RULES
+        elif app["watts"] > 1500:
+            # Rule 1: NEVER at night
+            if not is_daytime:
+                decision.update({
+                    "msg": "Daytime Only", 
+                    "status": "unsafe",
+                    "color": "var(--crit)",
+                    "reason": "Heavy loads not safe at night"
+                })
+            # Rule 2: Safe if current solar is enough
+            elif solar_surplus_kw >= app_kw:
+                 decision.update({
+                    "msg": "Safe to Run (Solar)", 
+                    "status": "safe", 
+                    "color": "var(--success)", 
+                    "reason": f"Solar surplus {solar_surplus_kw:.1f} kW"
+                })
+            # Rule 3: If no solar, require HIGHER battery (85%)
+            elif primary_pct > 85 and battery_kwh_available >= app_kwh_required * 1.5:
+                decision.update({
+                    "msg": "Safe to Run (Battery)", 
+                    "status": "safe", 
+                    "color": "var(--success)", 
+                    "reason": f"Primary {primary_pct:.0f}% > 85%, Battery Good"
+                })
+            else:
+                decision.update({
+                    "msg": "Wait for Solar", 
+                    "status": "unsafe",
+                    "color": "var(--warn)",
+                    "reason": "Need active solar or >85% battery"
+                })
+
+        # Moderate Loads - Existing Logic
         elif solar_surplus_kw >= app_kw and is_daytime:
             decision.update({
                 "msg": "Safe to Run (Solar)", 
@@ -303,27 +338,6 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
                 "color": "var(--success)", 
                 "reason": f"Solar surplus {solar_surplus_kw:.1f} kW"
             })
-        # For heavy loads, require good solar forecast OR high primary battery
-        elif app["watts"] > 1500:
-            if not has_good_solar_window:
-                decision.update({
-                    "msg": "Poor Solar Forecast", 
-                    "status": "unsafe",
-                    "color": "var(--warn)",
-                    "reason": "No good solar window today - avoid heavy loads"
-                })
-            elif primary_pct > 75 and battery_kwh_available >= app_kwh_required * 1.3 and battery_soc_pct >= 60:
-                decision.update({
-                    "msg": "Safe to Run (Battery)", 
-                    "status": "safe", 
-                    "color": "var(--success)", 
-                    "reason": f"Primary {primary_pct:.0f}%, Battery {battery_kwh_available:.1f} kWh"
-                })
-            else:
-                decision.update({
-                    "msg": "Wait for Better Conditions", 
-                    "reason": "Heavy load requires good solar or high battery"
-                })
         # For moderate loads, allow if battery is sufficient
         elif primary_pct > 75 and battery_kwh_available >= app_kwh_required * 1.3 and battery_soc_pct >= 60:
             decision.update({
@@ -850,6 +864,10 @@ def home():
 
     is_charging = solar > (load + 100)
     is_discharging = bat_dis > 100 or load > solar
+    
+    # Calculate daytime status
+    now = datetime.now(EAT)
+    is_night = (now.hour < 7 or now.hour >= 18)
 
     alerts = alert_history[:8]
     tier_labels = breakdown.get('tier_labels', ['Primary', 'Backup', 'Reserve'])
@@ -889,7 +907,6 @@ def home():
                 'class': 'good'
             })
             # Check if we're currently in the good window
-            now = datetime.now(EAT)
             if best_start <= now <= best_end:
                 heavy_loads_safe = True
         else:
@@ -931,8 +948,15 @@ def home():
             'description': 'Backup battery active - essential loads only',
             'class': 'warning'
         })
-    elif p_pct > 75 and surplus_power > 3000 and not schedule_blocks_heavy:
-        # Only recommend heavy loads if primary >75%, good surplus, AND schedule allows
+    elif is_night:
+        recommendation_items.append({
+            'icon': '🌙',
+            'title': 'NO HEAVY LOADS',
+            'description': 'Night time - preserve battery life',
+            'class': 'warning'
+        })
+    elif p_pct > 85 and surplus_power > 1500 and not schedule_blocks_heavy:
+        # Heavily favor current surplus OR high battery
         recommendation_items.append({
             'icon': '✅',
             'title': 'SAFE TO USE HEAVY LOADS',
@@ -940,8 +964,8 @@ def home():
             'class': 'good'
         })
         heavy_loads_safe = True
-    elif p_pct > 75 and heavy_loads_safe and not schedule_blocks_heavy:
-        # In good solar window per schedule but not huge surplus
+    elif p_pct > 85 and heavy_loads_safe and not schedule_blocks_heavy:
+        # In good solar window per schedule
         recommendation_items.append({
             'icon': '✅',
             'title': 'MODERATE LOADS OK',
@@ -955,7 +979,7 @@ def home():
             'description': f'Battery low ({breakdown["total_pct"]:.0f}%) and not charging well',
             'class': 'warning'
         })
-    elif schedule_blocks_heavy or p_pct <= 75:
+    elif schedule_blocks_heavy or p_pct <= 85:
         recommendation_items.append({
             'icon': '⚠️',
             'title': 'LIMIT HEAVY LOADS',
