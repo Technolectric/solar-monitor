@@ -267,14 +267,6 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
     solar_surplus_kw = max(current_solar_kw - current_load_kw, 0)
     is_daytime = now_hour is None or (7 <= now_hour <= 18)
     
-    # Check if there's a good solar window in forecast
-    has_good_solar_window = False
-    if isinstance(solar_forecast_kw, list):
-        for fc in solar_forecast_kw[:6]:  # Check next 6 hours
-            if fc.get('estimated_generation', 0) > 2000:
-                has_good_solar_window = True
-                break
-
     for app in APPLIANCE_PROFILES:
         app_kw = app["watts"] / 1000
         app_kwh_required = (app["watts"] * app["hours"]) / 1000
@@ -879,25 +871,58 @@ def home():
     surplus_power = solar - load
     b_active = d.get("backup_active", False)
     
-    # Build schedule items first (determines what's safe)
+    # --- 1. Calculate Safe Heavy Load Window (Schedule) ---
     schedule_items = []
-    heavy_loads_safe = False  # Track if schedule allows heavy loads
+    heavy_loads_safe = False
     
-    if s_fc:
+    if s_fc and l_fc:
         best_start, best_end, current_run = None, None, 0
         temp_start = None
-        for forecast_item in s_fc:
-            gen = forecast_item['estimated_generation']
-            if gen > 2000:
+        
+        # Iterate by index to ensure alignment between Solar and Load forecasts
+        limit = min(len(s_fc), len(l_fc))
+        
+        for i in range(limit):
+            s_item = s_fc[i]
+            l_item = l_fc[i]
+            t = s_item['time']
+            
+            # STRICT SAFETY RULE: Cutoff heavy loads at 4 PM
+            if t.hour >= 16:
+                if current_run > 0: # Close any open window
+                    if best_start is None or current_run > ((best_end - best_start).total_seconds() // 3600 if best_end else 0):
+                        best_start = temp_start
+                        best_end = t
+                    current_run = 0
+                continue # Skip remaining hours
+
+            gen = s_item['estimated_generation']
+            base_load = l_item.get('estimated_load', 600)
+            
+            # NET SURPLUS CHECK: 
+            # Generation - Expected Household Load must be > 2500W to run a 3kW appliance safely
+            net_surplus = gen - base_load
+            
+            if net_surplus > 2500:
                 if current_run == 0: 
-                    temp_start = forecast_item['time']
+                    temp_start = t
                 current_run += 1
             else:
                 if current_run > 0:
-                    if best_start is None or current_run > ((best_end.hour if best_end else 0) - (best_start.hour if best_start else 0)):
+                    current_duration = (t - temp_start).total_seconds()
+                    previous_duration = (best_end - best_start).total_seconds() if best_start and best_end else 0
+                    
+                    if best_start is None or current_duration > previous_duration:
                         best_start = temp_start
-                        best_end = forecast_item['time']
+                        best_end = t
                     current_run = 0
+        
+        # Handle case where window extends to the end of the array
+        if current_run > 0:
+             if best_start is None or current_run > ((best_end - best_start).total_seconds() // 3600 if best_end else 0):
+                best_start = temp_start
+                # approximate end as 1 hour after last start
+                best_end = s_fc[limit-1]['time'] + timedelta(hours=1)
         
         if best_start and best_end:
             schedule_items.append({
@@ -906,21 +931,20 @@ def home():
                 'time': f"{best_start.strftime('%I:%M %p').lstrip('0')} - {best_end.strftime('%I:%M %p').lstrip('0')}",
                 'class': 'good'
             })
-            # Check if we're currently in the good window
+            # Check if NOW is within the calculated safe window
             if best_start <= now <= best_end:
                 heavy_loads_safe = True
         else:
             schedule_items.append({
                 'icon': '☁️',
-                'title': 'No High Solar Window',
-                'time': 'Avoid heavy loads today',
+                'title': 'No Safe Solar Window',
+                'time': 'Net solar insufficient for 3kW+ loads',
                 'class': 'warning'
             })
         
-        # Cloud warnings
-        next_3_gen = sum([forecast_item['estimated_generation'] for forecast_item in s_fc[:3]]) / 3 if len(s_fc) >= 3 else 0
-        current_hour = datetime.now(EAT).hour
-        if next_3_gen < 500 and 8 <= current_hour <= 16:
+        # Cloud Warning
+        next_3_gen = sum([x['estimated_generation'] for x in s_fc[:3]]) / 3 if len(s_fc) >= 3 else 0
+        if next_3_gen < 500 and 8 <= now.hour <= 15:
             schedule_items.append({
                 'icon': '☁️',
                 'title': 'Cloud Warning',
@@ -928,11 +952,11 @@ def home():
                 'class': 'warning'
             })
     
-    # Build recommendations based on schedule and system state
+    # --- 2. Generate Recommendations (Synced with Schedule) ---
     recommendation_items = []
     
-    # Check if schedule says avoid heavy loads
-    schedule_blocks_heavy = any('Avoid heavy loads' in item.get('time', '') or 'No High Solar' in item.get('title', '') for item in schedule_items)
+    # Check if schedule blocked heavy loads
+    schedule_blocks_heavy = any('No Safe Solar' in item.get('title', '') for item in schedule_items)
     
     if gen_on:
         recommendation_items.append({
@@ -955,21 +979,28 @@ def home():
             'description': 'Night time - preserve battery life',
             'class': 'warning'
         })
-    elif p_pct > 85 and surplus_power > 1500 and not schedule_blocks_heavy:
-        # Heavily favor current surplus OR high battery
+    # Condition 1: High Battery Exception (Override Schedule if battery is very full)
+    elif p_pct > 85 and not schedule_blocks_heavy:
         recommendation_items.append({
             'icon': '✅',
             'title': 'SAFE TO USE HEAVY LOADS',
-            'description': f'Primary battery: {p_pct:.0f}% | Surplus: {surplus_power:.0f}W',
+            'description': f'Primary battery {p_pct:.0f}% (>85%) allows heavy usage',
             'class': 'good'
         })
-        heavy_loads_safe = True
-    elif p_pct > 85 and heavy_loads_safe and not schedule_blocks_heavy:
-        # In good solar window per schedule
+    # Condition 2: Inside Safe Solar Window (Synced with Schedule)
+    elif heavy_loads_safe:
+        recommendation_items.append({
+            'icon': '✅',
+            'title': 'SAFE TO USE HEAVY LOADS',
+            'description': f'Inside optimal solar window | Surplus available',
+            'class': 'good'
+        })
+    # Condition 3: Good Solar but Low Battery/Outside Best Window
+    elif not schedule_blocks_heavy and surplus_power > 1000:
         recommendation_items.append({
             'icon': '✅',
             'title': 'MODERATE LOADS OK',
-            'description': f'In good solar window | Primary: {p_pct:.0f}%',
+            'description': f'Solar is good, but wait for peak window for heavy loads',
             'class': 'good'
         })
     elif breakdown['total_pct'] < 50 and solar < load:
@@ -979,19 +1010,12 @@ def home():
             'description': f'Battery low ({breakdown["total_pct"]:.0f}%) and not charging well',
             'class': 'warning'
         })
-    elif schedule_blocks_heavy or p_pct <= 85:
+    else:
         recommendation_items.append({
             'icon': '⚠️',
             'title': 'LIMIT HEAVY LOADS',
-            'description': f'Primary battery {p_pct:.0f}% - use moderate loads only',
+            'description': 'Insufficient net surplus or battery < 85%',
             'class': 'warning'
-        })
-    else:
-        recommendation_items.append({
-            'icon': 'ℹ️',
-            'title': 'MONITOR USAGE',
-            'description': 'Check schedule below for optimal times',
-            'class': 'normal'
         })
 
     html = """
