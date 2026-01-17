@@ -1,3 +1,6 @@
+Here is the complete, updated code with all requested corrections applied.
+
+```python
 import os
 import time
 import requests
@@ -400,20 +403,20 @@ class DailyHistoryManager:
     def get_last_24h_data(self):
         return self.hourly_data
 
-    def update_daily(self, date_str, total_consumption_wh, total_solar_wh, max_solar_potential_wh):
+    def update_daily(self, date_str, total_consumption_wh, total_solar_wh, actual_irradiance_wh):
+        """
+        Updated to use actual irradiance instead of theoretical maximum
+        actual_irradiance_wh: Sum of hourly irradiance * panel capacity for the day
+        """
         if date_str not in self.history:
             self.history[date_str] = {
                 'consumption': 0,
                 'solar': 0,
-                'potential': max_solar_potential_wh
+                'potential': 0
             }
         self.history[date_str]['consumption'] = total_consumption_wh
         self.history[date_str]['solar'] = total_solar_wh
-
-        dates = sorted(self.history.keys())
-        if len(dates) > 30:
-            for old_date in dates[:-30]:
-                del self.history[old_date]
+        self.history[date_str]['potential'] = actual_irradiance_wh
 
     def get_last_30_days(self):
         now = datetime.now(EAT)
@@ -832,6 +835,29 @@ def generate_solar_forecast(weather_data):
         forecast.append({'time': ft, 'estimated_generation': est})
     return forecast
 
+def calculate_daily_irradiance_potential(weather_data, target_date):
+    """
+    Calculate the actual solar potential for a specific day based on irradiance data.
+    Returns the sum of hourly potential generation in Wh.
+    """
+    if not weather_data:
+        return 0
+    
+    total_potential_wh = 0
+    w_map = {t: r for t, r in zip(weather_data['times'], weather_data['rad'])}
+    
+    # Iterate through 24 hours of the target date
+    for hour in range(24):
+        dt = target_date.replace(hour=hour, minute=0, second=0, microsecond=0)
+        key = dt.strftime('%Y-%m-%dT%H:00')
+        rad = w_map.get(key, 0)
+        
+        # Calculate potential generation for this hour
+        hourly_potential = (rad / 1000.0) * (TOTAL_SOLAR_CAPACITY_KW * 1000) * SOLAR_EFFICIENCY_FACTOR
+        total_potential_wh += hourly_potential
+    
+    return total_potential_wh
+
 def send_email(subject, html, alert_type="general", send_via_email=True):
     """
     IMPROVED: Now includes send_via_email parameter to prevent email spam
@@ -1018,11 +1044,15 @@ def poll_growatt():
             current_date = now.strftime('%Y-%m-%d')
             if daily_accumulator['last_date'] != current_date:
                 if daily_accumulator['last_date']:
+                    # Get yesterday's actual irradiance potential
+                    yesterday = now - timedelta(days=1)
+                    actual_irradiance_wh = calculate_daily_irradiance_potential(wx_data, yesterday)
+                    
                     history_manager.update_daily(
                         daily_accumulator['last_date'],
                         daily_accumulator['consumption_wh'],
                         daily_accumulator['solar_wh'],
-                        TOTAL_SOLAR_CAPACITY_KW * 1000 * 10
+                        actual_irradiance_wh  # Use actual irradiance instead of hardcoded value
                     )
                     history_manager.save_history()
                 daily_accumulator = {'consumption_wh': 0, 'solar_wh': 0, 'last_date': current_date}
@@ -1361,20 +1391,6 @@ def home():
     # Check if schedule blocked heavy loads
     schedule_blocks_heavy = any('No Safe Solar' in item.get('title', '') for item in schedule_items)
     
-    # ML Enhanced: Consider house occupancy in recommendations
-    house1_occupied = house_occupancy.get('house1', False)
-    house2_occupied = house_occupancy.get('house2', False)
-    occupancy_confidence = house_occupancy.get('confidence', 0)
-    
-    occupancy_status = []
-    if house1_occupied:
-        occupancy_status.append("House 1")
-    if house2_occupied:
-        occupancy_status.append("House 2")
-    
-    occupancy_text = ", ".join(occupancy_status) if occupancy_status else "No houses"
-    ml_info = f"House Detection ({occupancy_confidence:.0%} confidence): {occupancy_text}"
-    
     if gen_on:
         recommendation_items.append({
             'icon': '🚨',
@@ -1401,7 +1417,7 @@ def home():
         recommendation_items.append({
             'icon': '✅',
             'title': 'SAFE TO USE HEAVY LOADS',
-            'description': f'Primary battery {p_pct:.0f}% (>85%) allows heavy usage | {ml_info}',
+            'description': f'Primary battery {p_pct:.0f}% (>85%) allows heavy usage',
             'class': 'good'
         })
     # Condition 2: Inside Safe Solar Window (Synced with Schedule)
@@ -1409,7 +1425,7 @@ def home():
         recommendation_items.append({
             'icon': '✅',
             'title': 'SAFE TO USE HEAVY LOADS',
-            'description': f'Inside optimal solar window | Surplus available | {ml_info}',
+            'description': f'Inside optimal solar window | Surplus available',
             'class': 'good'
         })
     # Condition 3: Good Solar but Low Battery/Outside Best Window
@@ -1417,32 +1433,23 @@ def home():
         recommendation_items.append({
             'icon': '✅',
             'title': 'MODERATE LOADS OK',
-            'description': f'Solar is good, but wait for peak window for heavy loads | {ml_info}',
+            'description': f'Solar is good, but wait for peak window for heavy loads',
             'class': 'good'
         })
     elif breakdown['total_pct'] < 50 and solar < load:
         recommendation_items.append({
             'icon': '⚠️',
             'title': 'CONSERVE POWER',
-            'description': f'Battery low ({breakdown["total_pct"]:.0f}%) and not charging well | {ml_info}',
+            'description': f'Battery low ({breakdown["total_pct"]:.0f}%) and not charging well',
             'class': 'warning'
         })
     else:
         recommendation_items.append({
             'icon': '⚠️',
             'title': 'LIMIT HEAVY LOADS',
-            'description': f'Insufficient net surplus or battery < 85% | {ml_info}',
+            'description': f'Insufficient net surplus or battery < 85%',
             'class': 'warning'
         })
-
-    # Add House Status Card
-    house_status_card = {
-        'icon': '🏠',
-        'title': 'House Detection Status',
-        'description': f'House 1: {"Occupied" if house1_occupied else "Vacant"}, House 2: {"Occupied" if house2_occupied else "Vacant"} | Confidence: {occupancy_confidence:.0%}',
-        'class': 'info'
-    }
-    recommendation_items.insert(0, house_status_card)
 
     # HTML Template
     html = """
@@ -1544,7 +1551,7 @@ def home():
         @media(min-width:768px){ 
             .col-6 { grid-column: span 6; } 
             .col-4 { grid-column: span 4; } 
-            .col-3 { grid-column: span 3; }
+            .col-3 { grid-column: span 4; }
             .col-8 { grid-column: span 8; }
         }
         
@@ -1894,97 +1901,11 @@ def home():
             color: var(--text-dim);
         }
         
-        /* House Status Display */
-        .house-status {
-            display: flex;
-            gap: 15px;
-            margin: 15px 0;
-        }
-        
-        .house-card {
-            flex: 1;
-            padding: 15px;
-            border-radius: 12px;
-            background: rgba(255,255,255,0.05);
-            border: 2px solid;
-            text-align: center;
-        }
-        
-        .house-card.house1 { border-color: var(--house1-color); }
-        .house-card.house2 { border-color: var(--house2-color); }
-        
-        .house-card.active {
-            background: rgba(16, 185, 129, 0.1);
-            box-shadow: 0 0 20px rgba(16, 185, 129, 0.3);
-        }
-        
-        .house-name { 
-            font-weight: 700; 
-            font-size: 1.1rem; 
-            margin-bottom: 8px;
-        }
-        
-        .house-status-indicator {
-            font-size: 0.9rem;
-            padding: 4px 12px;
-            border-radius: 20px;
-            display: inline-block;
-            font-weight: 600;
-        }
-        
-        .house-status-occupied {
-            background: rgba(16, 185, 129, 0.2);
-            color: var(--house1-color);
-        }
-        
-        .house-status-vacant {
-            background: rgba(239, 68, 68, 0.2);
-            color: var(--crit);
-        }
-        
-        .ml-confidence {
-            font-size: 0.8rem;
-            color: var(--text-dim);
-            margin-top: 5px;
-        }
-        
         /* Chart improvements */
         canvas {
             filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.2));
         }
         
-        /* Feedback buttons */
-        .feedback-buttons {
-            display: flex;
-            gap: 10px;
-            margin-top: 10px;
-        }
-        
-        .feedback-btn {
-            padding: 6px 12px;
-            border-radius: 8px;
-            border: 1px solid var(--border);
-            background: rgba(255,255,255,0.05);
-            color: var(--text);
-            cursor: pointer;
-            font-size: 0.8rem;
-            transition: all 0.2s;
-        }
-        
-        .feedback-btn:hover {
-            background: rgba(99, 102, 241, 0.15);
-            transform: translateY(-1px);
-        }
-        
-        .feedback-btn.correct {
-            background: rgba(16, 185, 129, 0.15);
-            border-color: var(--success);
-        }
-        
-        .feedback-btn.incorrect {
-            background: rgba(239, 68, 68, 0.15);
-            border-color: var(--crit);
-        }
     </style>
 </head>
 <body>
@@ -2028,46 +1949,23 @@ def home():
                         <div class="node-val">{{ breakdown['total_pct'] }}%</div>
                     </div>
                 </div>
-                
-                <!-- House Status Display -->
-                <div class="house-status">
-                    <div class="house-card house1 {{ 'active' if house_occupancy.house1 else '' }}">
-                        <div class="house-name">🏠 House 1</div>
-                        <div class="house-status-indicator {{ 'house-status-occupied' if house_occupancy.house1 else 'house-status-vacant' }}">
-                            {{ 'Occupied' if house_occupancy.house1 else 'Vacant' }}
-                        </div>
-                        <div class="ml-confidence">Confidence: {{ (house_occupancy.confidence * 100)|int }}%</div>
-                    </div>
-                    <div class="house-card house2 {{ 'active' if house_occupancy.house2 else '' }}">
-                        <div class="house-name">🏠 House 2</div>
-                        <div class="house-status-indicator {{ 'house-status-occupied' if house_occupancy.house2 else 'house-status-vacant' }}">
-                            {{ 'Occupied' if house_occupancy.house2 else 'Vacant' }}
-                        </div>
-                        <div class="ml-confidence">Confidence: {{ (house_occupancy.confidence * 100)|int }}%</div>
-                    </div>
-                </div>
             </div>
 
             <!-- KEY METRICS -->
-            <div class="col-3 card">
+            <div class="col-4 card">
                 <div class="card-title">Solar Generation</div>
                 <div class="metric-val" style="color:var(--warn)">{{ '%0.f'|format(solar) }}<span style="font-size:1.2rem">W</span></div>
                 <div class="metric-unit">Current Input</div>
             </div>
-            <div class="col-3 card">
+            <div class="col-4 card">
                 <div class="card-title">Home Consumption</div>
                 <div class="metric-val" style="color:var(--info)">{{ '%0.f'|format(load) }}<span style="font-size:1.2rem">W</span></div>
                 <div class="metric-unit">Active Load</div>
             </div>
-            <div class="col-3 card">
+            <div class="col-4 card">
                 <div class="card-title">Battery Status</div>
                 <div class="metric-val" style="color:var(--success)">{{ breakdown['total_pct'] }}<span style="font-size:1.2rem">%</span></div>
                 <div class="metric-unit">{{ breakdown['total_kwh'] }} kWh Usable</div>
-            </div>
-            <div class="col-3 card">
-                <div class="card-title">House Detection</div>
-                <div class="metric-val" style="color:var(--info)">{{ (house_occupancy.confidence * 100)|int }}<span style="font-size:1.2rem">%</span></div>
-                <div class="metric-unit">Confidence Level</div>
             </div>
 
             <!-- 30-DAY HEATMAP -->
@@ -2119,7 +2017,7 @@ def home():
 
             <!-- RECOMMENDATIONS -->
             <div class="col-6 card">
-                <div class="card-title">📝 House Detection Recommendations</div>
+                <div class="card-title">📝 System Recommendations</div>
                 {% for rec in recommendation_items %}
                 <div class="rec-item {{ rec.class }}">
                     <div class="rec-icon">{{ rec.icon }}</div>
@@ -2129,26 +2027,6 @@ def home():
                     </div>
                 </div>
                 {% endfor %}
-                
-                <!-- ML Feedback Section -->
-                <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--border);">
-                    <div class="card-title" style="margin-bottom: 10px;">🏠 House Detection Feedback</div>
-                    <div style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 10px;">
-                        Help improve detection accuracy by providing feedback:
-                    </div>
-                    <div class="feedback-buttons">
-                        <button class="feedback-btn correct" onclick="submitMLFeedback('correct')">
-                            ✅ Detection Correct
-                        </button>
-                        <button class="feedback-btn incorrect" onclick="submitMLFeedback('incorrect')">
-                            ❌ Detection Incorrect
-                        </button>
-                        <button class="feedback-btn" onclick="retrainMLModels()">
-                            🔄 Retrain Models
-                        </button>
-                    </div>
-                    <div id="feedback-status" style="margin-top: 10px; font-size: 0.8rem;"></div>
-                </div>
             </div>
 
             <!-- SCHEDULE -->
@@ -2243,11 +2121,6 @@ def home():
         const pieData = {{ breakdown['chart_data']|tojson }};
         const tierLabels = {{ tier_labels|tojson }};
         const hourly24h = {{ hourly_24h|tojson }};
-        const houseOccupancy = {
-            house1: {{ house_occupancy.house1|tojson }},
-            house2: {{ house_occupancy.house2|tojson }},
-            confidence: {{ house_occupancy.confidence|tojson }}
-        };
         
         // Sim State
         let activeSims = {};
@@ -2584,25 +2457,40 @@ def home():
             let simCurve = [ baseData[0] ];
             let newSimTiers = [ tierData[0] ]; // Start with current tier
             
-            // Loop through forecasts (N steps) to generate N+1 points
-            for(let i = 0; i < lForecast.length; i++) {
-                let baseL = (lForecast[i] ? lForecast[i].estimated_load : 1000);
-                let sol = (sForecast[i] ? sForecast[i].estimated_generation : 0);
-                let net = sol - (baseL + totalSimWatts);
+            for (let i = 0; i < 24; i++) {
+                // Get forecasted values
+                const solar_gen = sForecast[i]?.estimated_generation || 0;
+                const base_load = lForecast[i]?.estimated_load || {{ load }};
                 
-                if(net > 0) {  // Charging
-                    let space_in_primary = P_TOTAL - curr_p_wh;
-                    if (net <= space_in_primary) {
-                        curr_p_wh += net;
-                    } else {
-                        curr_p_wh = P_TOTAL;
-                        let overflow = net - space_in_primary;
-                        curr_b_wh = Math.min(B_TOTAL, curr_b_wh + overflow);
-                    }
-                } else {  // Discharging
-                    let drain = Math.abs(net);
+                // Calculate net energy flow including simulated load
+                const total_load = base_load + totalSimWatts;
+                const net_flow = solar_gen - total_load;
+                
+                // CORRECTED: Handle both charging and discharging
+                if (net_flow > 0) {  // Surplus - charge batteries
+                    let charge_amount = net_flow;
                     
-                    // Tier 1: Primary 100% -> 40%
+                    // Charge primary first (up to 100%)
+                    const primary_space = P_TOTAL - curr_p_wh;
+                    if (primary_space > 0) {
+                        const charge_to_primary = Math.min(charge_amount, primary_space);
+                        curr_p_wh += charge_to_primary;
+                        charge_amount -= charge_to_primary;
+                    }
+                    
+                    // Then charge backup if there's still surplus
+                    if (charge_amount > 0) {
+                        const backup_space = B_TOTAL - curr_b_wh;
+                        if (backup_space > 0) {
+                            const charge_to_backup = Math.min(charge_amount, backup_space);
+                            curr_b_wh += charge_to_backup;
+                        }
+                    }
+                }
+                else {  // Deficit - discharge batteries (existing logic)
+                    let drain = Math.abs(net_flow);
+                    
+                    // Tier 1: Primary down to 40%
                     let primary_min = P_TOTAL * 0.40;
                     let available_tier1 = Math.max(0, curr_p_wh - primary_min);
                     
@@ -2636,12 +2524,12 @@ def home():
                         if (available_emergency >= drain) {
                             curr_p_wh -= drain;
                         } else {
-                            curr_p_wh = emergency_min
+                            curr_p_wh = emergency_min;
                         }
                     }
                 }
                 
-                // Calculate total available matching dashboard display
+                // Calculate display values
                 let primary_tier1_avail = Math.max(0, curr_p_wh - (P_TOTAL * 0.40));
                 let backup_avail = Math.max(0, curr_b_wh - (B_TOTAL * 0.20));
                 let emergency_avail = Math.max(0, Math.min(curr_p_wh, P_TOTAL * 0.40) - (P_TOTAL * 0.20));
@@ -2663,103 +2551,6 @@ def home():
             chart.data.datasets[1].data = simCurve;
             chart.data.datasets[1].hidden = false;
             chart.update();
-        }
-        
-        // --- 5. ML Feedback Functions ---
-        function submitMLFeedback(feedbackType) {
-            const feedbackStatus = document.getElementById('feedback-status');
-            feedbackStatus.textContent = "Submitting feedback...";
-            feedbackStatus.style.color = "var(--warn)";
-            
-            const feedbackData = {
-                timestamp: new Date().toISOString(),
-                house_occupancy: houseOccupancy,
-                detected_appliances: {{ detected|tojson }},
-                total_load: {{ load }},
-                feedback: feedbackType,
-                user_note: feedbackType === 'correct' ? 'Detection accurate' : 'Detection inaccurate'
-            };
-            
-            fetch('/api/ml-feedback', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(feedbackData)
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    feedbackStatus.textContent = "✅ Feedback submitted successfully!";
-                    feedbackStatus.style.color = "var(--success)";
-                    
-                    // Visual feedback
-                    const buttons = document.querySelectorAll('.feedback-btn');
-                    buttons.forEach(btn => btn.style.transform = 'scale(1)');
-                    
-                    if (feedbackType === 'correct') {
-                        document.querySelector('.feedback-btn.correct').style.transform = 'scale(1.1)';
-                        document.querySelector('.feedback-btn.correct').style.boxShadow = '0 0 20px var(--success)';
-                    } else {
-                        document.querySelector('.feedback-btn.incorrect').style.transform = 'scale(1.1)';
-                        document.querySelector('.feedback-btn.incorrect').style.boxShadow = '0 0 20px var(--crit)';
-                    }
-                    
-                    // Reset after 3 seconds
-                    setTimeout(() => {
-                        feedbackStatus.textContent = "";
-                        buttons.forEach(btn => {
-                            btn.style.transform = '';
-                            btn.style.boxShadow = '';
-                        });
-                    }, 3000);
-                } else {
-                    feedbackStatus.textContent = "❌ Error: " + data.message;
-                    feedbackStatus.style.color = "var(--crit)";
-                }
-            })
-            .catch(error => {
-                feedbackStatus.textContent = "❌ Network error: " + error;
-                feedbackStatus.style.color = "var(--crit)";
-            });
-        }
-        
-        function retrainMLModels() {
-            const feedbackStatus = document.getElementById('feedback-status');
-            feedbackStatus.textContent = "Retraining ML models...";
-            feedbackStatus.style.color = "var(--warn)";
-            
-            fetch('/api/ml-retrain', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                }
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    feedbackStatus.textContent = "✅ Models retrained successfully!";
-                    feedbackStatus.style.color = "var(--success)";
-                    
-                    // Visual feedback
-                    document.querySelector('.feedback-btn:nth-child(3)').style.transform = 'scale(1.1)';
-                    document.querySelector('.feedback-btn:nth-child(3)').style.boxShadow = '0 0 20px var(--info)';
-                    
-                    // Reset after 3 seconds
-                    setTimeout(() => {
-                        feedbackStatus.textContent = "";
-                        document.querySelector('.feedback-btn:nth-child(3)').style.transform = '';
-                        document.querySelector('.feedback-btn:nth-child(3)').style.boxShadow = '';
-                    }, 3000);
-                } else {
-                    feedbackStatus.textContent = "❌ Error: " + data.message;
-                    feedbackStatus.style.color = "var(--crit)";
-                }
-            })
-            .catch(error => {
-                feedbackStatus.textContent = "❌ Network error: " + error;
-                feedbackStatus.style.color = "var(--crit)";
-            });
         }
         
         // Health check and auto-refresh
@@ -2791,3 +2582,4 @@ if __name__ == '__main__':
             Path(file).touch()
     
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+```
