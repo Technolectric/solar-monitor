@@ -466,49 +466,50 @@ history_manager = DailyHistoryManager(HISTORY_FILE)
 
 def identify_active_appliances(current, previous, gen_active, backup_volts, primary_pct):
     """
-    Enhanced detection using ML for two houses
+    Enhanced detection using ML for two houses - simplified to avoid duplicates
     """
     detected = []
-    delta = current - previous
     
     # CRITICAL: Manual generator detection
     if gen_active:
         if primary_pct > 42: 
-            detected.append("Generator Load") # Changed from Water Heating
+            detected.append("Generator Load")
         else: 
             detected.append("System Charging")
+        return detected  # Return early if generator is on
     
     # Use ML detector for house and appliance detection
     house_status = ml_detector.detect_houses(current)
     appliance_detection = ml_detector.detect_appliances(current, previous, house_status)
     
-    # Format detection results
-    for house, status in house_status.items():
-        if status and house in ['house1', 'house2']:
-            house_name = "House 1" if house == 'house1' else "House 2"
-            detected.append(f"{house_name} Occupied")
-    
-    # Add detected appliances
+    # Add detected appliances with house labels (no "Occupied" status)
+    has_detections = False
     for house, appliances in appliance_detection.items():
         if appliances:
             house_name = "House 1" if house == 'house1' else "House 2"
             for appliance in appliances:
-                if appliance != "Unknown Load":
+                if appliance != "Unknown Load" and appliance != "Idle":
                     detected.append(f"{house_name}: {appliance}")
+                    has_detections = True
     
-    # Fallback to basic detection if ML returns nothing
-    if not detected:
-        if current < 400: 
+    # Fallback to basic detection if ML returns nothing or only "Idle"
+    if not has_detections:
+        if current < 100: 
             detected.append("Idle")
+        elif 400 <= current < 1000: 
+            detected.append("Lights/TV")
         elif 1000 <= current <= 1350: 
             detected.append("Pool Pump")
-        elif current > 1800: 
+        elif 1800 <= current <= 2500: 
             detected.append("Cooking")
-        elif 400 <= current < 1000: 
-            detected.append("TV/Lights")
-        
-        if delta > 1500: 
+        elif 2000 <= current <= 2200:
             detected.append("Kettle")
+        elif 3000 <= current <= 5000:
+            detected.append("Water Heater")
+        elif 1500 <= current <= 3500:
+            detected.append("AC Unit")
+        else:
+            detected.append(f"Unknown Load ({current}W)")
     
     return detected
 
@@ -2602,4 +2603,3 @@ if __name__ == '__main__':
             Path(file).touch()
     
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
-
