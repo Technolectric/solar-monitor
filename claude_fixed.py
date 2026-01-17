@@ -81,7 +81,6 @@ class ApplianceDetector:
         self.load_model()
         
         # Known appliance signatures (watts)
-        # REMOVED: Water Heater and AC Unit as requested
         self.APPLIANCE_SIGNATURES = {
             'house1': {
                 'idle': (0, 100),
@@ -213,10 +212,9 @@ class ApplianceDetector:
                     cluster_label = self.house_clusters.predict(current_scaled)[0]
                     
                     # Analyze cluster patterns to determine occupancy
-                    cluster_centers = self.house_clusters.cluster_centers_
-                    
                     # Determine which cluster represents higher activity
-                    high_activity_cluster = np.argmax([center[0] for center in cluster_centers])
+                    # cluster_centers = self.house_clusters.cluster_centers_
+                    # high_activity_cluster = np.argmax([center[0] for center in cluster_centers])
                     
                     # Check if current load suggests occupancy
                     occupancy_threshold = 300  # Watts threshold for occupancy
@@ -256,7 +254,7 @@ class ApplianceDetector:
             
             # Extract features for classification
             recent_loads = [item['load'] for item in list(self.load_history)[-self.feature_window:]]
-            features = self.extract_features(recent_loads)
+            # features = self.extract_features(recent_loads)
             
             # Simple rule-based detection with ML enhancement
             if current_load < 200:
@@ -271,11 +269,8 @@ class ApplianceDetector:
                         continue
                     
                     # Estimate load allocation between houses
-                    # Simple heuristic: if only one house occupied, all load goes there
-                    # If both occupied, split based on typical patterns
                     if house_status.get('house1', False) and house_status.get('house2', False):
-                        # Both occupied - try to allocate load
-                        house_load = current_load / 2  # Simple split
+                        house_load = current_load / 2
                     else:
                         house_load = current_load
                     
@@ -509,7 +504,7 @@ def identify_active_appliances(current, previous, gen_active, backup_volts, prim
         elif 1500 <= current <= 3500:
             detected.append("AC Unit")
         else:
-            detected.append(f"Unknown Load ({current}W)")
+            detected.append(f"Load: {int(current)}W")
     
     return detected
 
@@ -992,70 +987,79 @@ def poll_growatt():
             b_data, gen_on = None, False
 
             for sn in SERIAL_NUMBERS:
-                try:
-                    r = requests.post(API_URL, data={"storage_sn": sn}, headers=headers, timeout=20)
-                    if r.status_code == 200:
-                        try:
-                            json_resp = r.json()
-                        except ValueError:
-                            continue
+                cfg = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown"})
+                success = False
+                
+                # FIX 1: Retry logic with 3 attempts
+                for attempt in range(3):
+                    try:
+                        r = requests.post(API_URL, data={"storage_sn": sn}, headers=headers, timeout=10) # Reduced timeout
+                        if r.status_code == 200:
+                            try:
+                                json_resp = r.json()
+                            except ValueError:
+                                raise Exception("Invalid JSON") # Trigger retry
 
-                        if json_resp.get("error_code") == 0:
-                            d = json_resp.get("data", {})
-                            last_communication[sn] = now  # Track successful communication
-                            
-                            op = float(d.get("outPutPower") or 0)
-                            cap = float(d.get("capacity") or 0)
-                            vb = float(d.get("vBat") or 0)
-                            pb = float(d.get("pBat") or 0)
-                            sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
-                            temp = max(
-                                float(d.get("invTemperature") or 0),
-                                float(d.get("dcDcTemperature") or 0),
-                                float(d.get("temperature") or 0)
-                            )
-                            flt = int(d.get("errorCode") or 0) != 0
+                            if json_resp.get("error_code") == 0:
+                                d = json_resp.get("data", {})
+                                last_communication[sn] = now
+                                
+                                op = float(d.get("outPutPower") or 0)
+                                cap = float(d.get("capacity") or 0)
+                                vb = float(d.get("vBat") or 0)
+                                pb = float(d.get("pBat") or 0)
+                                sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
+                                temp = max(
+                                    float(d.get("invTemperature") or 0),
+                                    float(d.get("dcDcTemperature") or 0),
+                                    float(d.get("temperature") or 0)
+                                )
+                                flt = int(d.get("errorCode") or 0) != 0
 
-                            tot_out += op
-                            tot_sol += sol
-                            if pb > 0: tot_bat += pb
+                                tot_out += op
+                                tot_sol += sol
+                                if pb > 0: tot_bat += pb
 
-                            cfg = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown"})
-                            info = {
-                                "SN": sn, 
-                                "Label": cfg['label'], 
-                                "OutputPower": op, 
-                                "Capacity": cap, 
-                                "vBat": vb, 
-                                "temp": temp,
-                                "temperature": temp,
-                                "high_temperature": temp >= 60,
-                                "has_fault": flt,
-                                "communication_lost": False
-                            }
-                            inv_data.append(info)
+                                info = {
+                                    "SN": sn, 
+                                    "Label": cfg['label'], 
+                                    "OutputPower": op, 
+                                    "Capacity": cap, 
+                                    "vBat": vb, 
+                                    "temp": temp,
+                                    "temperature": temp,
+                                    "high_temperature": temp >= 60,
+                                    "has_fault": flt,
+                                    "communication_lost": False
+                                }
+                                inv_data.append(info)
 
-                            if cfg['type'] == 'primary': p_caps.append(cap)
-                            elif cfg['type'] == 'backup':
-                                b_data = info
-                                if float(d.get("vac") or 0) > 100 or float(d.get("pAcInPut") or 0) > 50: gen_on = True
-                except:
-                    # Check if communication has been lost for more than 10 minutes
-                    if sn in last_communication and (now - last_communication[sn]) > timedelta(minutes=10):
-                        cfg = INVERTER_CONFIG.get(sn, {"label": sn, "type": "unknown"})
-                        inv_data.append({
-                            "SN": sn, 
-                            "Label": cfg.get('label', sn), 
-                            "Type": cfg.get('type'),
-                            "OutputPower": 0,
-                            "Capacity": 0,
-                            "vBat": 0,
-                            "temp": 0,
-                            "temperature": 0,
-                            "high_temperature": False,
-                            "has_fault": False,
-                            "communication_lost": True
-                        })
+                                if cfg['type'] == 'primary': p_caps.append(cap)
+                                elif cfg['type'] == 'backup':
+                                    b_data = info
+                                    if float(d.get("vac") or 0) > 100 or float(d.get("pAcInPut") or 0) > 50: gen_on = True
+                                
+                                success = True
+                                break # Success, exit retry loop
+                    except Exception as e:
+                        print(f"⚠️ Polling attempt {attempt+1} failed for {sn}: {e}", flush=True)
+                        time.sleep(1) # Wait before retry
+
+                if not success:
+                    # FIX 1: Always add inverter to data even if failed so it doesn't disappear
+                    inv_data.append({
+                        "SN": sn, 
+                        "Label": cfg.get('label', sn), 
+                        "Type": cfg.get('type'),
+                        "OutputPower": 0,
+                        "Capacity": 0,
+                        "vBat": 0,
+                        "temp": 0,
+                        "temperature": 0,
+                        "high_temperature": False,
+                        "has_fault": False,
+                        "communication_lost": True
+                    })
 
             p_min = min(p_caps) if p_caps else 0
             b_volts = b_data['vBat'] if b_data else 0
