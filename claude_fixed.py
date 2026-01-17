@@ -1,6 +1,3 @@
-Here is the complete, updated code with all requested corrections applied.
-
-```python
 import os
 import time
 import requests
@@ -12,12 +9,21 @@ from threading import Thread, Lock
 from flask import Flask, render_template_string, request, jsonify
 from collections import deque
 from pathlib import Path
-from sklearn.cluster import KMeans, DBSCAN
+from sklearn.cluster import KMeans
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 import joblib
 import warnings
+import logging
+
+# Configure logging to stdout so we can see startup errors in Railway logs
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Suppress warnings
 warnings.filterwarnings('ignore')
+
+print("🚀 Starting application initialization...", flush=True)
 
 # ----------------------------
 # Flask App & Config
@@ -69,24 +75,21 @@ class ApplianceDetector:
         self.load_model()
         
         # Known appliance signatures (watts)
+        # REMOVED: Water Heater and AC Unit as requested
         self.APPLIANCE_SIGNATURES = {
             'house1': {
                 'idle': (0, 100),
                 'lights_tv': (400, 1000),
                 'pool_pump': (1000, 1350),
                 'cooking': (1800, 2500),
-                'kettle': (2000, 2200),
-                'water_heater': (3000, 5000),
-                'ac_unit': (1500, 3500)
+                'kettle': (2000, 2200)
             },
             'house2': {
                 'idle': (0, 100),
                 'lights_tv': (400, 1000),
                 'pool_pump': (1000, 1350),
                 'cooking': (1800, 2500),
-                'kettle': (2000, 2200),
-                'water_heater': (3000, 5000),
-                'ac_unit': (1500, 3500)
+                'kettle': (2000, 2200)
             }
         }
         
@@ -98,13 +101,18 @@ class ApplianceDetector:
         if Path(self.model_file).exists():
             try:
                 with self.model_lock:
-                    models = joblib.load(self.model_file)
-                    self.house_clusters = models.get('house_clusters')
-                    self.appliance_classifier = models.get('appliance_classifier')
-                    self.scaler = models.get('scaler', StandardScaler())
-                print("✅ Loaded ML models from disk")
+                    # Check if file is empty
+                    if os.path.getsize(self.model_file) > 0:
+                        models = joblib.load(self.model_file)
+                        self.house_clusters = models.get('house_clusters')
+                        self.appliance_classifier = models.get('appliance_classifier')
+                        self.scaler = models.get('scaler', StandardScaler())
+                        print("✅ Loaded ML models from disk", flush=True)
+                    else:
+                        print("⚠️ ML model file exists but is empty. initializing default.", flush=True)
+                        self.init_default_models()
             except Exception as e:
-                print(f"⚠️ Failed to load ML models: {e}")
+                print(f"⚠️ Failed to load ML models: {e}", flush=True)
                 self.init_default_models()
         else:
             self.init_default_models()
@@ -113,7 +121,7 @@ class ApplianceDetector:
         """Initialize default models"""
         self.house_clusters = KMeans(n_clusters=2, random_state=42)
         self.appliance_classifier = RandomForestClassifier(n_estimators=100, random_state=42)
-        print("✅ Initialized default ML models")
+        print("✅ Initialized default ML models", flush=True)
     
     def save_model(self):
         """Save trained models to disk"""
@@ -125,9 +133,9 @@ class ApplianceDetector:
                     'scaler': self.scaler
                 }
                 joblib.dump(models, self.model_file)
-            print("💾 Saved ML models to disk")
+            print("💾 Saved ML models to disk", flush=True)
         except Exception as e:
-            print(f"⚠️ Failed to save ML models: {e}")
+            print(f"⚠️ Failed to save ML models: {e}", flush=True)
     
     def extract_features(self, load_data):
         """Extract features from load data for ML analysis"""
@@ -454,7 +462,7 @@ def identify_active_appliances(current, previous, gen_active, backup_volts, prim
     # CRITICAL: Manual generator detection
     if gen_active:
         if primary_pct > 42: 
-            detected.append("Water Heating")
+            detected.append("Generator Load") # Changed from Water Heating
         else: 
             detected.append("System Charging")
     
