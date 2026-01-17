@@ -16,7 +16,7 @@ import joblib
 import warnings
 import logging
 
-# Configure logging to stdout so we can see startup errors in Railway logs
+# Configure logging to see errors in Railway console
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,12 @@ POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
 DATA_FILE = "load_patterns.json"
 HISTORY_FILE = "daily_history.json"
 ML_MODEL_FILE = "appliance_models.pkl"
+
+# Initialize Data Files immediately so they exist for Gunicorn
+for file in [DATA_FILE, HISTORY_FILE, ML_MODEL_FILE]:
+    if not Path(file).exists():
+        Path(file).touch()
+        print(f"Created empty file: {file}", flush=True)
 
 # Inverter Mapping
 INVERTER_CONFIG = {
@@ -112,7 +118,7 @@ class ApplianceDetector:
                         print("⚠️ ML model file exists but is empty. initializing default.", flush=True)
                         self.init_default_models()
             except Exception as e:
-                print(f"⚠️ Failed to load ML models: {e}", flush=True)
+                print(f"⚠️ Failed to load ML models (reinitializing): {e}", flush=True)
                 self.init_default_models()
         else:
             self.init_default_models()
@@ -231,12 +237,12 @@ class ApplianceDetector:
                         return {'house1': False, 'house2': False, 'confidence': 0.9}
                         
                 except Exception as e:
-                    print(f"⚠️ Clustering error: {e}")
+                    print(f"⚠️ Clustering error: {e}", flush=True)
             
             return {'house1': current_load > 300, 'house2': False, 'confidence': 0.6}
             
         except Exception as e:
-            print(f"⚠️ House detection error: {e}")
+            print(f"⚠️ House detection error: {e}", flush=True)
             return {'house1': current_load > 300, 'house2': False, 'confidence': 0.5}
     
     def detect_appliances(self, current_load, previous_load, house_status):
@@ -301,7 +307,7 @@ class ApplianceDetector:
             return detected
             
         except Exception as e:
-            print(f"⚠️ Appliance detection error: {e}")
+            print(f"⚠️ Appliance detection error: {e}", flush=True)
             return {'house1': ["System Error"], 'house2': []}
     
     def train_from_feedback(self, feedback_data):
@@ -328,10 +334,10 @@ class ApplianceDetector:
             with open(feedback_file, 'w') as f:
                 json.dump(feedback_history, f)
             
-            print("📝 Saved ML feedback")
+            print("📝 Saved ML feedback", flush=True)
             
         except Exception as e:
-            print(f"⚠️ Feedback training error: {e}")
+            print(f"⚠️ Feedback training error: {e}", flush=True)
 
 # Initialize ML detector
 ml_detector = ApplianceDetector()
@@ -348,8 +354,12 @@ class PersistentLoadManager:
         if Path(self.filename).exists():
             try:
                 with open(self.filename, 'r') as f:
+                    # Check for empty file
+                    if os.path.getsize(self.filename) == 0:
+                        return {"weekday": {str(h): [] for h in range(24)}, "weekend": {str(h): [] for h in range(24)}}
                     return json.load(f)
-            except: pass
+            except Exception as e:
+                print(f"Error loading load patterns: {e}", flush=True)
         return {"weekday": {str(h): [] for h in range(24)}, "weekend": {str(h): [] for h in range(24)}}
 
     def save_data(self):
@@ -388,6 +398,8 @@ class DailyHistoryManager:
         if Path(self.filename).exists():
             try:
                 with open(self.filename, 'r') as f:
+                    if os.path.getsize(self.filename) == 0:
+                        return {}
                     return json.load(f)
             except: pass
         return {}
@@ -969,7 +981,7 @@ def poll_growatt():
     last_ml_save = datetime.now(EAT)
     polling_active = True
 
-    print("🚀 System Started: Enhanced Dashboard Mode with ML Detection")
+    print("🚀 System Started: Enhanced Dashboard Mode with ML Detection", flush=True)
 
     while polling_active:
         try:
@@ -1072,9 +1084,9 @@ def poll_growatt():
             # ML ENHANCED: Detection & Persistence
             house_status = ml_detector.detect_houses(tot_out)
             detected = identify_active_appliances(tot_out, prev_watts, gen_on, b_volts, p_min)
-            is_manual_gen = any("Water" in x for x in detected)
+            is_manual_gen = any("Generator" in x for x in detected)
             
-            # Only update load manager if NOT manually running generator for water heating
+            # Only update load manager if NOT manually running generator
             if not is_manual_gen: 
                 load_manager.update(tot_out)
             
@@ -1212,10 +1224,10 @@ def poll_growatt():
             
             # Log ML insights
             ml_insight = f"ML: Houses - House1:{house_status.get('house1', False)} House2:{house_status.get('house2', False)} Conf:{house_status.get('confidence', 0):.1f}"
-            print(f"Update: Load={tot_out}W, Battery={breakdown['total_pct']}% | {ml_insight}")
+            print(f"Update: Load={tot_out}W, Battery={breakdown['total_pct']}% | {ml_insight}", flush=True)
 
         except Exception as e: 
-            print(f"Error: {e}")
+            print(f"Error: {e}", flush=True)
             latest_data['ml_status'] = f"Error: {str(e)[:50]}"
         
         if polling_active:
