@@ -77,29 +77,26 @@ class ApplianceDetector:
     def __init__(self):
         self.model_file = ML_MODEL_FILE
         self.load_history = deque(maxlen=1000)  # Store recent load patterns
-        self.house_clusters = None
         self.appliance_classifier = None
         self.scaler = StandardScaler()
         self.model_lock = Lock()
         self.load_model()
         
-        # Known appliance signatures (watts)
-        self.APPLIANCE_SIGNATURES = {
-            'house1': {
-                'idle': (0, 100),
-                'lights_tv': (400, 1000),
-                'pool_pump': (1000, 1350),
-                'cooking': (1800, 2500),
-                'kettle': (2000, 2200)
-            },
-            'house2': {
-                'idle': (0, 100),
-                'lights_tv': (400, 1000),
-                'pool_pump': (1000, 1350),
-                'cooking': (1800, 2500),
-                'kettle': (2000, 2200)
-            }
-        }
+        # Appliance categories for classification
+        self.APPLIANCE_CLASSES = [
+            'idle',           # 0-150W
+            'lights_tv',      # 150-800W
+            'kettle',         # 1800-2400W (spike pattern)
+            'pool_pump',      # 1000-1400W (sustained)
+            'cooking',        # 1500-3000W (gradual ramp)
+            'water_heater',   # 2000-3500W (sustained)
+            'ac',             # 1000-2000W (cycling pattern)
+            'multiple_loads'  # Complex patterns
+        ]
+        
+        # Training data for initial model (load, duration, spike_rate, variance) -> class
+        self.training_data = []
+        self.training_labels = []
         
         # Feature window for pattern analysis
         self.feature_window = 10  # Analyze last 10 data points
@@ -112,10 +109,11 @@ class ApplianceDetector:
                     # Check if file is empty
                     if os.path.getsize(self.model_file) > 0:
                         models = joblib.load(self.model_file)
-                        self.house_clusters = models.get('house_clusters')
                         self.appliance_classifier = models.get('appliance_classifier')
                         self.scaler = models.get('scaler', StandardScaler())
-                        print("✅ Loaded ML models from disk", flush=True)
+                        self.training_data = models.get('training_data', [])
+                        self.training_labels = models.get('training_labels', [])
+                        print("✅ Loaded ML appliance models from disk", flush=True)
                     else:
                         print("⚠️ ML model file exists but is empty. initializing default.", flush=True)
                         self.init_default_models()
@@ -126,204 +124,274 @@ class ApplianceDetector:
             self.init_default_models()
     
     def init_default_models(self):
-        """Initialize default models"""
-        self.house_clusters = KMeans(n_clusters=2, random_state=42)
-        self.appliance_classifier = RandomForestClassifier(n_estimators=100, random_state=42)
-        print("✅ Initialized default ML models", flush=True)
+        """Initialize default models with seed training data"""
+        self.appliance_classifier = RandomForestClassifier(
+            n_estimators=100, 
+            max_depth=10,
+            random_state=42
+        )
+        
+        # Seed with basic patterns (features: [mean_load, std, max, min, spike_count, duration_factor])
+        seed_data = [
+            # Idle
+            [50, 20, 100, 10, 0, 1.0],
+            [30, 15, 80, 5, 0, 1.0],
+            # Lights/TV
+            [500, 100, 700, 400, 1, 0.8],
+            [600, 80, 750, 450, 0, 0.9],
+            # Kettle (high spike, short duration)
+            [2100, 200, 2200, 1900, 3, 0.2],
+            [2000, 150, 2150, 1850, 2, 0.3],
+            # Pool pump (sustained, medium load)
+            [1200, 50, 1300, 1100, 0, 1.0],
+            [1150, 40, 1250, 1050, 0, 1.0],
+            # Cooking (gradual increase, high load)
+            [2200, 400, 2800, 1600, 1, 0.7],
+            [1900, 350, 2500, 1400, 1, 0.6],
+            # Water heater (sustained high)
+            [3000, 200, 3300, 2700, 1, 0.9],
+            [2800, 180, 3100, 2600, 1, 0.95],
+            # AC (cycling pattern)
+            [1500, 300, 1800, 1200, 2, 0.6],
+            [1400, 280, 1700, 1100, 2, 0.65],
+            # Multiple loads
+            [3500, 600, 4200, 2800, 3, 0.8],
+            [4000, 700, 5000, 3000, 4, 0.75],
+        ]
+        
+        seed_labels = [
+            'idle', 'idle',
+            'lights_tv', 'lights_tv',
+            'kettle', 'kettle',
+            'pool_pump', 'pool_pump',
+            'cooking', 'cooking',
+            'water_heater', 'water_heater',
+            'ac', 'ac',
+            'multiple_loads', 'multiple_loads'
+        ]
+        
+        self.training_data = seed_data
+        self.training_labels = seed_labels
+        
+        # Train initial model
+        X = np.array(seed_data)
+        y = np.array(seed_labels)
+        self.scaler.fit(X)
+        X_scaled = self.scaler.transform(X)
+        self.appliance_classifier.fit(X_scaled, y)
+        
+        print("✅ Initialized ML appliance models with seed data", flush=True)
     
     def save_model(self):
         """Save trained models to disk"""
         try:
             with self.model_lock:
                 models = {
-                    'house_clusters': self.house_clusters,
                     'appliance_classifier': self.appliance_classifier,
-                    'scaler': self.scaler
+                    'scaler': self.scaler,
+                    'training_data': self.training_data,
+                    'training_labels': self.training_labels
                 }
                 joblib.dump(models, self.model_file)
-            print("💾 Saved ML models to disk", flush=True)
+            print("💾 Saved ML appliance models to disk", flush=True)
         except Exception as e:
             print(f"⚠️ Failed to save ML models: {e}", flush=True)
     
-    def extract_features(self, load_data):
-        """Extract features from load data for ML analysis"""
+    def extract_features(self, load_data, time_data=None):
+        """
+        Extract features from load data for appliance classification.
+        Features capture the signature of different appliances.
+        """
         features = []
         
-        # Basic statistical features
-        if len(load_data) > 0:
-            features.append(np.mean(load_data))  # Mean load
-            features.append(np.std(load_data))   # Standard deviation
-            features.append(np.max(load_data))   # Peak load
-            features.append(np.min(load_data))   # Minimum load
-            features.append(np.median(load_data)) # Median load
-            
-            # Rate of change features
-            if len(load_data) > 1:
-                changes = np.diff(load_data)
-                features.append(np.mean(changes))    # Average change
-                features.append(np.std(changes))     # Change volatility
-                features.append(np.max(changes))     # Max change
-                features.append(np.min(changes))     # Min change
-                
-                # Detect sudden spikes/drops
-                large_changes = np.abs(changes) > 500
-                features.append(np.sum(large_changes))  # Count of large changes
+        if len(load_data) == 0:
+            return [0] * 12
         
-        # Pad with zeros if insufficient data
+        # Basic statistical features
+        features.append(np.mean(load_data))      # Mean load
+        features.append(np.std(load_data))       # Variability
+        features.append(np.max(load_data))       # Peak load
+        features.append(np.min(load_data))       # Minimum load
+        features.append(np.median(load_data))    # Median
+        
+        # Rate of change features (detect spikes vs gradual)
+        if len(load_data) > 1:
+            changes = np.diff(load_data)
+            features.append(np.mean(changes))     # Average rate of change
+            features.append(np.std(changes))      # Change volatility
+            features.append(np.max(changes))      # Max spike up
+            features.append(np.min(changes))      # Max spike down
+            
+            # Spike detection (sudden changes > 500W)
+            large_changes = np.abs(changes) > 500
+            features.append(np.sum(large_changes))  # Spike count
+            
+            # Pattern stability (low = stable like pool pump, high = cycling like AC)
+            if np.mean(load_data) > 0:
+                features.append(np.std(load_data) / np.mean(load_data))  # Coefficient of variation
+            else:
+                features.append(0)
+        else:
+            features.extend([0, 0, 0, 0, 0, 0])
+        
+        # Time-based feature (if available)
+        if time_data:
+            hour = time_data.hour
+            features.append(1.0 if 6 <= hour <= 22 else 0.5)  # Day vs night factor
+        else:
+            features.append(0.7)  # Default
+        
+        # Pad or trim to 12 features
         while len(features) < 12:
             features.append(0)
         
-        return features[:12]  # Return first 12 features
+        return features[:12]
     
-    def detect_houses(self, current_load, historical_data=None):
+    def detect_appliances(self, current_load, previous_load=0):
         """
-        Detect which house is active using clustering.
-        Returns: {'house1': bool, 'house2': bool, 'confidence': float}
+        ML-based appliance detection using pattern recognition.
+        Returns: List of detected appliance names with confidence scores
         """
         try:
+            now = datetime.now(EAT)
+            
             # Add current load to history
             self.load_history.append({
-                'timestamp': datetime.now(EAT),
-                'load': current_load,
-                'features': self.extract_features([current_load])
+                'timestamp': now,
+                'load': current_load
             })
             
-            # Need enough data for clustering
-            if len(self.load_history) < 20:
-                return {'house1': True, 'house2': False, 'confidence': 0.5}
+            # Need enough data for pattern analysis
+            if len(self.load_history) < self.feature_window:
+                return self._simple_fallback_detection(current_load)
             
-            # Prepare data for clustering
-            load_values = [item['load'] for item in self.load_history]
-            recent_loads = load_values[-20:]  # Use last 20 points
-            
-            # Create 2D features: [load, time_of_day_weight]
-            times = [item['timestamp'].hour + item['timestamp'].minute/60 
-                    for item in list(self.load_history)[-20:]]
-            
-            X = np.array([[load, time] for load, time in zip(recent_loads, times)])
-            
-            # Train/update clustering
-            if len(X) >= 10:
-                try:
-                    X_scaled = self.scaler.fit_transform(X)
-                    self.house_clusters.fit(X_scaled)
-                    
-                    # Predict current state
-                    current_time = datetime.now(EAT).hour + datetime.now(EAT).minute/60
-                    current_features = np.array([[current_load, current_time]])
-                    current_scaled = self.scaler.transform(current_features)
-                    cluster_label = self.house_clusters.predict(current_scaled)[0]
-                    
-                    # Analyze cluster patterns to determine occupancy
-                    # Determine which cluster represents higher activity
-                    # cluster_centers = self.house_clusters.cluster_centers_
-                    # high_activity_cluster = np.argmax([center[0] for center in cluster_centers])
-                    
-                    # Check if current load suggests occupancy
-                    occupancy_threshold = 300  # Watts threshold for occupancy
-                    is_occupied = current_load > occupancy_threshold
-                    
-                    # If occupied, determine which house(s)
-                    if is_occupied:
-                        # Check if pattern matches typical dual-occupancy
-                        load_variation = np.std(recent_loads)
-                        is_dual = load_variation > 800 and current_load > 1500
-                        
-                        if is_dual:
-                            return {'house1': True, 'house2': True, 'confidence': 0.7}
-                        else:
-                            # Single house occupied
-                            return {'house1': True, 'house2': False, 'confidence': 0.8}
-                    else:
-                        return {'house1': False, 'house2': False, 'confidence': 0.9}
-                        
-                except Exception as e:
-                    print(f"⚠️ Clustering error: {e}", flush=True)
-            
-            return {'house1': current_load > 300, 'house2': False, 'confidence': 0.6}
-            
-        except Exception as e:
-            print(f"⚠️ House detection error: {e}", flush=True)
-            return {'house1': current_load > 300, 'house2': False, 'confidence': 0.5}
-    
-    def detect_appliances(self, current_load, previous_load, house_status):
-        """
-        Detect specific appliances using ML and signature matching.
-        Returns: List of detected appliances per house
-        """
-        try:
-            delta = current_load - previous_load
-            detected = {'house1': [], 'house2': []}
-            
-            # Extract features for classification
+            # Get recent load pattern
             recent_loads = [item['load'] for item in list(self.load_history)[-self.feature_window:]]
-            # features = self.extract_features(recent_loads)
             
-            # Simple rule-based detection with ML enhancement
-            if current_load < 200:
-                for house in ['house1', 'house2']:
-                    if house_status.get(house, False):
-                        detected[house].append("Idle")
+            # Extract features from pattern
+            features = self.extract_features(recent_loads, now)
             
-            else:
-                # Check for appliance signatures
-                for house in ['house1', 'house2']:
-                    if not house_status.get(house, False):
-                        continue
+            # Use ML classifier to predict appliance type
+            try:
+                features_scaled = self.scaler.transform([features])
+                predicted_class = self.appliance_classifier.predict(features_scaled)[0]
+                confidence = np.max(self.appliance_classifier.predict_proba(features_scaled))
+                
+                # Format output
+                detected = []
+                
+                # Only report if confidence is reasonable
+                if confidence > 0.4:
+                    appliance_name = predicted_class.replace('_', ' ').title()
+                    detected.append(f"{appliance_name}")
                     
-                    # Estimate load allocation between houses
-                    if house_status.get('house1', False) and house_status.get('house2', False):
-                        house_load = current_load / 2
-                    else:
-                        house_load = current_load
-                    
-                    # Match against known signatures
-                    for appliance, (min_w, max_w) in self.APPLIANCE_SIGNATURES[house].items():
-                        if min_w <= house_load <= max_w:
-                            appliance_name = appliance.replace('_', ' ').title()
-                            detected[house].append(appliance_name)
-                    
-                    # Special detection for sudden high loads only
-                    if delta > 1500:
-                        detected[house].append("Kettle/Toaster")
-            
-            # Filter duplicates and clean up
-            for house in detected:
-                detected[house] = list(set(detected[house]))
-                if not detected[house] and house_status.get(house, False):
-                    detected[house].append("Unknown Load")
-            
-            return detected
+                    # Check for multiple appliances (high load + high variance)
+                    if current_load > 3000 and np.std(recent_loads) > 500:
+                        if predicted_class != 'multiple_loads':
+                            detected.append("+ Other Loads")
+                else:
+                    # Low confidence - use simple detection
+                    detected = self._simple_fallback_detection(current_load)
+                
+                return detected
+                
+            except Exception as e:
+                print(f"⚠️ ML classification error: {e}", flush=True)
+                return self._simple_fallback_detection(current_load)
             
         except Exception as e:
             print(f"⚠️ Appliance detection error: {e}", flush=True)
-            return {'house1': ["System Error"], 'house2': []}
+            return ["System Error"]
+    
+    def _simple_fallback_detection(self, current_load):
+        """Simple rule-based fallback when ML is not ready"""
+        if current_load < 150:
+            return ["Idle"]
+        elif 150 <= current_load < 800:
+            return ["Lights/TV"]
+        elif 800 <= current_load < 1400:
+            return ["Pool Pump or AC"]
+        elif 1400 <= current_load < 1800:
+            return ["Water Heater or Cooking"]
+        elif 1800 <= current_load < 2500:
+            return ["Kettle or Cooking"]
+        elif 2500 <= current_load < 3500:
+            return ["Water Heater"]
+        else:
+            return ["Multiple Appliances"]
     
     def train_from_feedback(self, feedback_data):
         """
-        Improve models based on user feedback
-        feedback_data: {'timestamp': str, 'actual_appliances': list, 'predicted': list}
+        Improve models based on user feedback.
+        feedback_data: {
+            'timestamp': str, 
+            'actual_appliance': str,  # e.g., 'kettle', 'pool_pump'
+            'load_pattern': list,     # Recent load readings
+            'current_load': float
+        }
         """
         try:
-            # This would be enhanced with actual training data collection
-            # For now, just save the feedback
+            if not feedback_data.get('actual_appliance') or not feedback_data.get('load_pattern'):
+                return
+            
+            # Extract features from the corrected pattern
+            load_pattern = feedback_data['load_pattern']
+            timestamp = datetime.fromisoformat(feedback_data['timestamp']) if isinstance(feedback_data['timestamp'], str) else feedback_data['timestamp']
+            features = self.extract_features(load_pattern, timestamp)
+            
+            # Add to training data
+            self.training_data.append(features)
+            self.training_labels.append(feedback_data['actual_appliance'])
+            
+            # Keep training set manageable (last 500 examples)
+            if len(self.training_data) > 500:
+                self.training_data = self.training_data[-500:]
+                self.training_labels = self.training_labels[-500:]
+            
+            # Retrain model if we have enough diverse data
+            if len(self.training_data) >= 20:
+                try:
+                    X = np.array(self.training_data)
+                    y = np.array(self.training_labels)
+                    
+                    # Refit scaler and classifier
+                    self.scaler.fit(X)
+                    X_scaled = self.scaler.transform(X)
+                    self.appliance_classifier.fit(X_scaled, y)
+                    
+                    # Save updated model
+                    self.save_model()
+                    
+                    print(f"✅ ML model retrained with {len(self.training_data)} examples", flush=True)
+                except Exception as e:
+                    print(f"⚠️ Model retraining failed: {e}", flush=True)
+            
+            # Also save feedback to file for analysis
             feedback_file = "ml_feedback.json"
             feedback_history = []
             
             if Path(feedback_file).exists():
-                with open(feedback_file, 'r') as f:
-                    feedback_history = json.load(f)
+                try:
+                    with open(feedback_file, 'r') as f:
+                        if os.path.getsize(feedback_file) > 0:
+                            feedback_history = json.load(f)
+                except:
+                    pass
             
-            feedback_history.append(feedback_data)
+            feedback_history.append({
+                'timestamp': feedback_data['timestamp'] if isinstance(feedback_data['timestamp'], str) else feedback_data['timestamp'].isoformat(),
+                'actual_appliance': feedback_data['actual_appliance'],
+                'current_load': feedback_data.get('current_load', 0)
+            })
             
             # Keep only recent feedback
-            if len(feedback_history) > 100:
-                feedback_history = feedback_history[-100:]
+            if len(feedback_history) > 200:
+                feedback_history = feedback_history[-200:]
             
             with open(feedback_file, 'w') as f:
                 json.dump(feedback_history, f)
             
-            print("📝 Saved ML feedback", flush=True)
+            print(f"📝 Saved ML feedback: {feedback_data['actual_appliance']}", flush=True)
             
         except Exception as e:
             print(f"⚠️ Feedback training error: {e}", flush=True)
@@ -455,7 +523,7 @@ history_manager = DailyHistoryManager(HISTORY_FILE)
 
 def identify_active_appliances(current, previous, gen_active, backup_volts, primary_pct):
     """
-    Enhanced detection using ML for two houses - simplified to avoid duplicates
+    Enhanced detection using ML appliance classifier
     """
     detected = []
     
@@ -467,40 +535,20 @@ def identify_active_appliances(current, previous, gen_active, backup_volts, prim
             detected.append("System Charging")
         return detected  # Return early if generator is on
     
-    # Use ML detector for house and appliance detection
-    house_status = ml_detector.detect_houses(current)
-    appliance_detection = ml_detector.detect_appliances(current, previous, house_status)
+    # Use ML detector for appliance classification
+    appliances = ml_detector.detect_appliances(current, previous)
     
-    # Add detected appliances with house labels (no "Occupied" status)
-    has_detections = False
-    for house, appliances in appliance_detection.items():
-        if appliances:
-            house_name = "House 1" if house == 'house1' else "House 2"
-            for appliance in appliances:
-                if appliance != "Unknown Load" and appliance != "Idle":
-                    detected.append(f"{house_name}: {appliance}")
-                    has_detections = True
-    
-    # Fallback to basic detection if ML returns nothing or only "Idle"
-    if not has_detections:
+    if appliances:
+        detected = appliances
+    else:
+        # Fallback
         if current < 100: 
             detected.append("Idle")
-        elif 400 <= current < 1000: 
-            detected.append("Lights/TV")
-        elif 1000 <= current <= 1350: 
-            detected.append("Pool Pump")
-        elif 1800 <= current <= 2500: 
-            detected.append("Cooking")
-        elif 2000 <= current <= 2200:
-            detected.append("Kettle")
-        elif 3000 <= current <= 5000:
-            detected.append("Water Heater")
-        elif 1500 <= current <= 3500:
-            detected.append("AC Unit")
         else:
             detected.append(f"Load: {int(current)}W")
     
     return detected
+
 
 # ----------------------------
 # 3. Physics & Scheduler Engine
@@ -821,7 +869,6 @@ latest_data = {
     "scheduler": [],
     "heatmap_data": [],
     "hourly_24h": [],
-    "house_occupancy": {"house1": False, "house2": False, "confidence": 0},
     "ml_status": "Initializing"
 }
 
@@ -1145,8 +1192,7 @@ def poll_growatt():
             daily_accumulator['consumption_wh'] += tot_out * interval_hours
             daily_accumulator['solar_wh'] += tot_sol * interval_hours
 
-            # ML ENHANCED: Detection & Persistence
-            house_status = ml_detector.detect_houses(tot_out)
+            # ML ENHANCED: Appliance Detection
             detected = identify_active_appliances(tot_out, prev_watts, gen_on, b_volts, p_min)
             is_manual_gen = any("Generator" in x for x in detected)
             
@@ -1281,14 +1327,13 @@ def poll_growatt():
                 "inverters": inv_data,
                 "heatmap_data": heatmap,
                 "hourly_24h": hourly_24h,
-                "house_occupancy": house_status,
                 "ml_status": "Active",
-                "heavy_loads_safe": heavy_loads_safe  # Add this for consistency
+                "heavy_loads_safe": heavy_loads_safe
             }
             
             # Log ML insights
-            ml_insight = f"ML: Houses - House1:{house_status.get('house1', False)} House2:{house_status.get('house2', False)} Conf:{house_status.get('confidence', 0):.1f}"
-            print(f"Update: Load={tot_out}W, Battery={breakdown['total_pct']}% | {ml_insight}", flush=True)
+            appliance_str = ", ".join(detected[:3]) if detected else "Idle"
+            print(f"Update: Load={tot_out}W, Battery={breakdown['total_pct']}% | ML Detected: {appliance_str}", flush=True)
 
         except Exception as e: 
             print(f"Error: {e}", flush=True)
@@ -1351,7 +1396,6 @@ def home():
     b_volt = _n("backup_battery_voltage")
     gen_on = d.get("generator_running", False)
     detected = d.get("detected_appliances", [])
-    house_occupancy = d.get("house_occupancy", {"house1": False, "house2": False, "confidence": 0})
     heavy_loads_safe = d.get("heavy_loads_safe", False)
 
     breakdown = d.get("energy_breakdown") or {
@@ -2656,7 +2700,7 @@ def home():
         tier_labels=tier_labels, primary_pct=primary_pct, 
         backup_voltage=backup_voltage, backup_pct=backup_pct,
         recommendation_items=recommendation_items, schedule_items=schedule_items,
-        house_occupancy=house_occupancy, heavy_loads_safe=heavy_loads_safe
+        heavy_loads_safe=heavy_loads_safe
     )
 
 if __name__ == '__main__':
