@@ -283,18 +283,9 @@ class ApplianceDetector:
                             appliance_name = appliance.replace('_', ' ').title()
                             detected[house].append(appliance_name)
                     
-                    # Special detection for combined loads
+                    # Special detection for sudden high loads only
                     if delta > 1500:
                         detected[house].append("Kettle/Toaster")
-                    
-                    if 1000 <= house_load <= 1350:
-                        detected[house].append("Pool Pump")
-                    
-                    if house_load > 1800:
-                        detected[house].append("Cooking")
-                    
-                    if 400 <= house_load < 1000:
-                        detected[house].append("TV/Lights")
             
             # Filter duplicates and clean up
             for house in detected:
@@ -2194,7 +2185,7 @@ def home():
                         <div style="color:{{ 'var(--crit)' if 'crit' in a.type else 'var(--text)' }}; font-weight: 600;">
                             {{ a.subject }}
                         </div>
-                        <div class="alert-time">{{ a.timestamp.strftime('%H:%M') }}</div>
+                        <div class="alert-time">{{ a.timestamp.strftime('%b %d, %H:%M') }}</div>
                     </div>
                     {% endfor %}
                 {% else %}
