@@ -764,16 +764,30 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
 def calculate_battery_breakdown(p_pct, b_volts, site_config):
     """Calculates breakdown for circular chart using centralized logic."""
     status = get_energy_status(p_pct, b_volts, site_config)
+    
+    # Check if backup battery exists
+    if site_config.get("backup_battery_wh", 0) > 0:
+        chart_data = [round(x / 1000, 1) for x in status['breakdown_wh']]
+        tier_labels = ['Primary', 'Backup', 'Reserve']
+        tier_colors = ['rgba(16, 185, 129, 0.9)', 'rgba(59, 130, 246, 0.8)', 'rgba(245, 158, 11, 0.8)']
+    else:
+        # If no backup, remove the middle element (Backup) from breakdown
+        wh_list = status['breakdown_wh']
+        # breakdown_wh is [primary, backup, reserve] -> take [0] and [2]
+        chart_data = [round(wh_list[0] / 1000, 1), round(wh_list[2] / 1000, 1)]
+        tier_labels = ['Primary', 'Reserve']
+        tier_colors = ['rgba(16, 185, 129, 0.9)', 'rgba(245, 158, 11, 0.8)']
 
     return {
-        'chart_data': [round(x / 1000, 1) for x in status['breakdown_wh']],
-        'tier_labels': ['Primary', 'Backup', 'Reserve'],
+        'chart_data': chart_data,
+        'tier_labels': tier_labels,
+        'tier_colors': tier_colors,
         'total_pct': round(status['total_pct'], 1),
         'total_kwh': round(status['total_available_wh'] / 1000, 1),
         'primary_pct': p_pct,
         'backup_voltage': round(b_volts, 1),
         'backup_pct': round(status['b_pct'], 1),
-        'status_obj': {**status, 'primary_battery_pct': p_pct}  # Add primary_pct to status
+        'status_obj': {**status, 'primary_battery_pct': p_pct}
     }
 
 def calculate_battery_cascade(solar, load, p_pct, b_volts, site_config):
@@ -1548,6 +1562,7 @@ def home():
     breakdown = d.get("energy_breakdown") or {
         "chart_data": [1,0,1], 
         "tier_labels": ['Primary', 'Backup', 'Reserve'],
+        "tier_colors": ['rgba(16, 185, 129, 0.9)', 'rgba(59, 130, 246, 0.8)', 'rgba(245, 158, 11, 0.8)'],
         "total_pct": 0, 
         "total_kwh": 0,
         "primary_pct": 0,
@@ -2296,7 +2311,9 @@ def home():
                     {{ breakdown['total_kwh'] }} kWh Usable</div>
                 <div style="margin-top:10px; padding-top:10px; border-top: 1px solid var(--border); font-size:0.75rem; color: var(--text-dim)">
                     <div>Primary: {{ primary_pct }}%</div>
+                    {% if site_config['backup_battery_wh'] > 0 %}
                     <div>Backup: {{ backup_voltage }}V ({{ backup_pct }}%)</div>
+                    {% endif %}
                 </div>
             </div>
 
@@ -2356,6 +2373,7 @@ def home():
         const lForecast = {{ l_fc|tojson }};
         const pieData = {{ breakdown['chart_data']|tojson }};
         const tierLabels = {{ tier_labels|tojson }};
+        const pieColors = {{ breakdown['tier_colors']|tojson }}; // Dynamic Colors
         const hourly24h = {{ hourly_24h|tojson }};
         
         // Sim State
@@ -2488,18 +2506,14 @@ def home():
             }
         });
 
-        // --- 2. Storage Pie Chart (No Percentages) ---
+        // --- 2. Storage Pie Chart (Dynamic Colors) ---
         new Chart(document.getElementById('pieChart'), {
             type: 'doughnut',
             data: {
                 labels: tierLabels,
                 datasets: [{
                     data: pieData,
-                    backgroundColor: [
-                        'rgba(16, 185, 129, 0.9)',   // Primary (green)
-                        'rgba(59, 130, 246, 0.8)',    // Backup (blue)
-                        'rgba(245, 158, 11, 0.8)'     // Reserve (orange)
-                    ],
+                    backgroundColor: pieColors, // Use colors from backend
                     borderWidth: 0,
                     borderRadius: 4,
                     spacing: 2
