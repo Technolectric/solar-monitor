@@ -1190,7 +1190,7 @@ def poll_growatt():
                                             "OutputPower": op, 
                                             "Capacity": cap, 
                                             "vBat": vb, 
-                                            "temp": temp,
+                                            "temp": temp, 
                                             "temperature": temp,
                                             "high_temperature": temp >= 60,
                                             "has_fault": flt,
@@ -1476,14 +1476,20 @@ def api_data():
     
     data = site_latest_data.get(site_id, {}).get('data', {})
     if not data:
-        # Return initialization placeholder
+        # Return initialization placeholder with ALL fields required by frontend
         return jsonify({
             "timestamp": "Initializing...", "total_output_power": 0, "total_solar_input_W": 0,
             "primary_battery_min": 0, "backup_battery_voltage": 0, "backup_active": False,
             "generator_running": False, "inverters": [], "detected_appliances": [], 
             "solar_forecast": [], "load_forecast": [], 
             "battery_sim": {"labels": [], "data": [], "tiers": []},
-            "energy_breakdown": {"chart_data": [1, 0, 1], "total_pct": 0, "total_kwh": 0},
+            "energy_breakdown": {
+                "chart_data": [1, 0, 1], 
+                "total_pct": 0, 
+                "total_kwh": 0,
+                "tier_labels": ['Primary', 'Backup', 'Reserve'],
+                "tier_colors": ['rgba(16, 185, 129, 0.9)', 'rgba(59, 130, 246, 0.8)', 'rgba(245, 158, 11, 0.8)']
+            },
             "scheduler": [], "heatmap_data": [], "hourly_24h": [], "ml_status": "Initializing"
         })
     return jsonify(data)
@@ -1536,7 +1542,7 @@ def home():
         
     d = site_latest_data.get(site_id, {}).get('data', {})
     
-    # Handle uninitialized state
+    # Handle uninitialized state with COMPLETE default structure
     if not d:
          d = {
             "timestamp": "Initializing...", "total_output_power": 0, "total_solar_input_W": 0,
@@ -1544,7 +1550,13 @@ def home():
             "generator_running": False, "inverters": [], "detected_appliances": [], 
             "solar_forecast": [], "load_forecast": [], 
             "battery_sim": {"labels": [], "data": [], "tiers": []},
-            "energy_breakdown": {"chart_data": [1, 0, 1], "total_pct": 0, "total_kwh": 0},
+            "energy_breakdown": {
+                "chart_data": [1, 0, 1], 
+                "total_pct": 0, 
+                "total_kwh": 0,
+                "tier_labels": ['Primary', 'Backup', 'Reserve'],
+                "tier_colors": ['rgba(16, 185, 129, 0.9)', 'rgba(59, 130, 246, 0.8)', 'rgba(245, 158, 11, 0.8)']
+            },
             "scheduler": [], "heatmap_data": [], "hourly_24h": [], "ml_status": "Initializing"
         }
 
@@ -1559,16 +1571,19 @@ def home():
     detected = d.get("detected_appliances", [])
     heavy_loads_safe = d.get("heavy_loads_safe", False)
 
-    breakdown = d.get("energy_breakdown") or {
-        "chart_data": [1,0,1], 
-        "tier_labels": ['Primary', 'Backup', 'Reserve'],
-        "tier_colors": ['rgba(16, 185, 129, 0.9)', 'rgba(59, 130, 246, 0.8)', 'rgba(245, 158, 11, 0.8)'],
-        "total_pct": 0, 
-        "total_kwh": 0,
-        "primary_pct": 0,
-        "backup_voltage": 0,
-        "backup_pct": 0
-    }
+    # Use .get() with fallback to handle potential incomplete data during transitions
+    breakdown = d.get("energy_breakdown") or {}
+    
+    # Ensure all required fields exist in breakdown
+    breakdown.setdefault("chart_data", [1, 0, 1])
+    breakdown.setdefault("tier_labels", ['Primary', 'Backup', 'Reserve'])
+    breakdown.setdefault("tier_colors", ['rgba(16, 185, 129, 0.9)', 'rgba(59, 130, 246, 0.8)', 'rgba(245, 158, 11, 0.8)'])
+    breakdown.setdefault("total_pct", 0)
+    breakdown.setdefault("total_kwh", 0)
+    breakdown.setdefault("primary_pct", 0)
+    breakdown.setdefault("backup_voltage", 0)
+    breakdown.setdefault("backup_pct", 0)
+    
     sim = d.get("battery_sim") or {"labels": [], "data": [], "tiers": []}
     s_fc = d.get("solar_forecast") or []
     l_fc = d.get("load_forecast") or []
