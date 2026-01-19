@@ -67,6 +67,9 @@ RESEND_API_KEY = os.getenv('RESEND_API_KEY')
 SENDER_EMAIL = os.getenv('SENDER_EMAIL')
 RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL')
 
+# Weather API Config
+WEATHERAPI_KEY = os.getenv('WEATHERAPI_KEY')
+
 # ----------------------------
 # 1. Machine Learning Appliance Detection
 # ----------------------------
@@ -832,34 +835,94 @@ latest_data = {
 }
 
 def get_weather_forecast():
+    """
+    Multi-source weather forecast with automatic fallback.
+    Tries Open-Meteo first, then WeatherAPI if it fails.
+    Returns: {'times': [...], 'rad': [...]} or None
+    """
+    # Try Open-Meteo first (free, no API key needed)
     try:
         url = f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=shortwave_radiation&timezone=Africa/Nairobi&forecast_days=2"
         r = requests.get(url, timeout=5).json()
-        return {'times': r['hourly']['time'], 'rad': r['hourly']['shortwave_radiation']}
-    except: return None
+        print("✅ Weather data from Open-Meteo", flush=True)
+        return {'times': r['hourly']['time'], 'rad': r['hourly']['shortwave_radiation'], 'source': 'Open-Meteo'}
+    except Exception as e:
+        print(f"⚠️ Open-Meteo failed: {e}", flush=True)
+    
+    # Fallback to WeatherAPI.com
+    if WEATHERAPI_KEY:
+        try:
+            # WeatherAPI provides solar radiation in W/m²
+            url = f"https://api.weatherapi.com/v1/forecast.json?key={WEATHERAPI_KEY}&q={LATITUDE},{LONGITUDE}&days=2&hour=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23"
+            r = requests.get(url, timeout=5).json()
+            
+            # Parse WeatherAPI response into same format as Open-Meteo
+            times = []
+            radiation = []
+            
+            for day in r['forecast']['forecastday']:
+                for hour in day['hour']:
+                    times.append(hour['time'])
+                    # WeatherAPI gives solar_radiation directly in W/m²
+                    radiation.append(hour.get('solar_radiation', 0))
+            
+            print("✅ Weather data from WeatherAPI (fallback)", flush=True)
+            return {'times': times, 'rad': radiation, 'source': 'WeatherAPI'}
+        except Exception as e:
+            print(f"⚠️ WeatherAPI fallback failed: {e}", flush=True)
+    else:
+        print("⚠️ WEATHERAPI_KEY not configured, skipping fallback", flush=True)
+    
+    print("❌ All weather sources failed", flush=True)
+    return None
 
 def generate_solar_forecast(weather_data):
+    """
+    Generate 24-hour solar forecast from weather data.
+    Handles both Open-Meteo and WeatherAPI formats.
+    """
     forecast = []
     now = datetime.now(EAT)
-    if not weather_data: return forecast
+    
+    if not weather_data:
+        print("⚠️ No weather data available - solar forecast will be empty", flush=True)
+        return forecast
+    
+    source = weather_data.get('source', 'Unknown')
     w_map = {t: r for t, r in zip(weather_data['times'], weather_data['rad'])}
+    
     for i in range(24):
         ft = now + timedelta(hours=i)
+        
+        # Try different time formats for compatibility
         key = ft.strftime('%Y-%m-%dT%H:00')
         rad = w_map.get(key, 0)
+        
+        # If not found, try alternative format (WeatherAPI uses different format)
+        if rad == 0 and source == 'WeatherAPI':
+            key_alt = ft.strftime('%Y-%m-%d %H:00')
+            rad = w_map.get(key_alt, 0)
+        
+        # Convert radiation to estimated generation
+        # radiation is in W/m², convert to total system watts
         est = (rad / 1000.0) * (TOTAL_SOLAR_CAPACITY_KW * 1000) * SOLAR_EFFICIENCY_FACTOR
         forecast.append({'time': ft, 'estimated_generation': est})
+    
+    print(f"✅ Generated solar forecast from {source}: {len(forecast)} hours", flush=True)
     return forecast
 
 def calculate_daily_irradiance_potential(weather_data, target_date):
     """
     Calculate the actual solar potential for a specific day based on irradiance data.
     Returns the sum of hourly potential generation in Wh.
+    Handles both Open-Meteo and WeatherAPI formats.
     """
     if not weather_data:
+        print("⚠️ No weather data for irradiance calculation", flush=True)
         return 0
     
     total_potential_wh = 0
+    source = weather_data.get('source', 'Unknown')
     w_map = {t: r for t, r in zip(weather_data['times'], weather_data['rad'])}
     
     # Iterate through 24 hours of the target date
@@ -867,6 +930,11 @@ def calculate_daily_irradiance_potential(weather_data, target_date):
         dt = target_date.replace(hour=hour, minute=0, second=0, microsecond=0)
         key = dt.strftime('%Y-%m-%dT%H:00')
         rad = w_map.get(key, 0)
+        
+        # Try alternative format for WeatherAPI
+        if rad == 0 and source == 'WeatherAPI':
+            key_alt = dt.strftime('%Y-%m-%d %H:00')
+            rad = w_map.get(key_alt, 0)
         
         # Calculate potential generation for this hour
         hourly_potential = (rad / 1000.0) * (TOTAL_SOLAR_CAPACITY_KW * 1000) * SOLAR_EFFICIENCY_FACTOR
