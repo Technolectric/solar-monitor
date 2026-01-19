@@ -82,16 +82,50 @@ class ApplianceDetector:
         self.model_lock = Lock()
         self.load_model()
         
-        # Appliance categories for classification
+        # Comprehensive appliance categories for classification (100 appliances)
         self.APPLIANCE_CLASSES = [
-            'idle',           # 0-150W
-            'lights_tv',      # 150-800W
-            'kettle',         # 1800-2400W (spike pattern)
-            'pool_pump',      # 1000-1400W (sustained)
-            'cooking',        # 1500-3000W (gradual ramp)
-            'water_heater',   # 2000-3500W (sustained)
-            'ac',             # 1000-2000W (cycling pattern)
-            'multiple_loads'  # Complex patterns
+            # Basic States
+            'idle',
+            'multiple_loads',
+            
+            # Kitchen Appliances (25)
+            'microwave', 'electric_kettle', 'toaster', 'toaster_oven', 'coffee_maker',
+            'rice_cooker', 'slow_cooker', 'pressure_cooker', 'blender', 'food_processor',
+            'stand_mixer', 'hand_mixer', 'bread_maker', 'juicer', 'electric_grill',
+            'sandwich_maker', 'waffle_maker', 'deep_fryer', 'electric_wok', 'hot_plate',
+            'induction_cooker', 'garbage_disposal', 'electric_can_opener', 'food_warmer', 'egg_cooker',
+            
+            # Cooling/Refrigeration (8)
+            'refrigerator', 'freezer', 'mini_fridge', 'wine_cooler', 'ice_maker',
+            'chest_freezer', 'commercial_fridge', 'beverage_cooler',
+            
+            # Laundry & Cleaning (10)
+            'washing_machine', 'dryer', 'iron', 'steamer', 'vacuum_cleaner',
+            'carpet_cleaner', 'steam_mop', 'spin_dryer', 'garment_steamer', 'handheld_vacuum',
+            
+            # Heating & Comfort (10)
+            'electric_fan', 'ceiling_fan', 'tower_fan', 'table_fan', 'box_fan',
+            'exhaust_fan', 'humidifier', 'dehumidifier', 'electric_heater', 'space_heater',
+            
+            # Personal Care (10)
+            'hair_dryer', 'hair_straightener', 'curling_iron', 'electric_shaver', 'toothbrush_charger',
+            'hair_clippers', 'facial_steamer', 'hot_comb', 'electric_nail_file', 'foot_spa',
+            
+            # Electronics & Entertainment (15)
+            'desktop_computer', 'laptop', 'gaming_console', 'tv_32', 'tv_55',
+            'tv_plasma', 'sound_system', 'stereo', 'bluetooth_speaker', 'projector',
+            'dvd_player', 'cable_box', 'satellite_decoder', 'gaming_pc', 'monitor',
+            
+            # Lighting (8)
+            'led_bulbs', 'led_strips', 'fluorescent_tubes', 'cfl_bulbs', 'halogen_bulbs',
+            'incandescent_bulbs', 'desk_lamp', 'floor_lamp',
+            
+            # Office & Work (8)
+            'printer', 'scanner', 'fax_machine', 'paper_shredder', 'laminator',
+            'label_maker', 'pencil_sharpener', 'photocopier',
+            
+            # Utility & Infrastructure (6)
+            'water_pump', 'pool_pump', 'borehole_pump', 'sump_pump', 'router', 'security_system'
         ]
         
         # Training data for initial model (load, duration, spike_rate, variance) -> class
@@ -131,43 +165,165 @@ class ApplianceDetector:
             random_state=42
         )
         
-        # Seed with basic patterns (features: [mean_load, std, max, min, spike_count, duration_factor])
+        # Seed with comprehensive patterns for common appliances
+        # Features: [mean_load, std, max, min, median, rate_change, change_std, max_spike, min_spike, spike_count, coef_var, time_factor]
         seed_data = [
-            # Idle
-            [50, 20, 100, 10, 0, 1.0],
-            [30, 15, 80, 5, 0, 1.0],
-            # Lights/TV
-            [500, 100, 700, 400, 1, 0.8],
-            [600, 80, 750, 450, 0, 0.9],
-            # Kettle (high spike, short duration)
-            [2100, 200, 2200, 1900, 3, 0.2],
-            [2000, 150, 2150, 1850, 2, 0.3],
-            # Pool pump (sustained, medium load)
-            [1200, 50, 1300, 1100, 0, 1.0],
-            [1150, 40, 1250, 1050, 0, 1.0],
-            # Cooking (gradual increase, high load)
-            [2200, 400, 2800, 1600, 1, 0.7],
-            [1900, 350, 2500, 1400, 1, 0.6],
-            # Water heater (sustained high)
-            [3000, 200, 3300, 2700, 1, 0.9],
-            [2800, 180, 3100, 2600, 1, 0.95],
-            # AC (cycling pattern)
-            [1500, 300, 1800, 1200, 2, 0.6],
-            [1400, 280, 1700, 1100, 2, 0.65],
-            # Multiple loads
-            [3500, 600, 4200, 2800, 3, 0.8],
-            [4000, 700, 5000, 3000, 4, 0.75],
+            # Idle (0-150W)
+            [50, 20, 100, 10, 45, 5, 10, 20, -15, 0, 0.4, 0.7],
+            [30, 15, 80, 5, 28, 3, 8, 15, -10, 0, 0.5, 0.7],
+            [75, 25, 120, 20, 70, 8, 12, 30, -20, 0, 0.33, 0.5],
+            
+            # Multiple loads (complex, high variance)
+            [3500, 600, 4200, 2800, 3400, 200, 400, 800, -600, 3, 0.17, 0.8],
+            [4000, 700, 5000, 3000, 3900, 250, 450, 900, -700, 4, 0.18, 0.75],
+            [3800, 650, 4500, 2900, 3700, 220, 420, 850, -650, 3, 0.17, 0.8],
+            
+            # Kitchen - Microwave (800-1500W, short bursts)
+            [1200, 150, 1400, 1000, 1180, 100, 80, 300, -250, 2, 0.13, 1.0],
+            [1100, 130, 1300, 900, 1090, 90, 70, 280, -230, 2, 0.12, 1.0],
+            
+            # Kitchen - Electric Kettle (1500-2200W, high spike, short)
+            [2100, 200, 2200, 1900, 2080, 150, 120, 400, -350, 3, 0.10, 0.7],
+            [2000, 180, 2150, 1850, 1980, 140, 110, 380, -330, 2, 0.09, 0.7],
+            [1900, 170, 2100, 1750, 1880, 130, 100, 360, -310, 3, 0.09, 1.0],
+            
+            # Kitchen - Toaster (800-1500W, short)
+            [1100, 120, 1250, 950, 1080, 70, 60, 200, -180, 1, 0.11, 1.0],
+            [1000, 110, 1150, 850, 980, 60, 50, 180, -160, 1, 0.11, 1.0],
+            
+            # Kitchen - Rice Cooker (400-1000W, sustained then low)
+            [700, 200, 950, 400, 650, 50, 120, 300, -350, 1, 0.29, 0.7],
+            [650, 180, 900, 350, 600, 45, 110, 280, -320, 1, 0.28, 0.7],
+            
+            # Kitchen - Blender (300-1000W, very short bursts)
+            [600, 250, 900, 300, 550, 200, 180, 500, -450, 4, 0.42, 0.8],
+            [550, 230, 850, 280, 520, 180, 160, 480, -420, 4, 0.42, 0.8],
+            
+            # Kitchen - Coffee Maker (800-1400W, short sustained)
+            [1100, 80, 1200, 1000, 1090, 30, 40, 120, -100, 1, 0.07, 1.0],
+            [1050, 75, 1150, 950, 1040, 28, 38, 110, -95, 1, 0.07, 1.0],
+            
+            # Refrigerator (100-300W, cycling compressor)
+            [180, 60, 250, 100, 170, 20, 40, 100, -120, 2, 0.33, 0.7],
+            [200, 65, 270, 110, 190, 22, 42, 110, -130, 2, 0.33, 0.7],
+            [160, 55, 230, 90, 155, 18, 38, 95, -110, 2, 0.34, 0.7],
+            
+            # Freezer (150-400W, cycling)
+            [250, 80, 350, 150, 240, 30, 50, 140, -150, 2, 0.32, 0.7],
+            [280, 85, 380, 160, 270, 32, 52, 150, -160, 2, 0.30, 0.7],
+            
+            # Washing Machine (500-2000W, cycling phases)
+            [1200, 400, 1800, 600, 1150, 150, 250, 600, -550, 3, 0.33, 0.8],
+            [1100, 380, 1700, 550, 1050, 140, 240, 580, -530, 3, 0.35, 0.8],
+            [1300, 420, 1900, 650, 1250, 160, 260, 620, -570, 3, 0.32, 0.7],
+            
+            # Iron (1000-1800W, sustained with variations)
+            [1400, 180, 1650, 1100, 1380, 60, 100, 280, -250, 1, 0.13, 0.8],
+            [1300, 170, 1550, 1000, 1280, 55, 95, 260, -230, 1, 0.13, 0.8],
+            
+            # Vacuum Cleaner (1000-1400W, intermittent)
+            [1200, 120, 1350, 1050, 1180, 80, 70, 200, -180, 2, 0.10, 0.8],
+            [1150, 115, 1300, 1000, 1130, 75, 68, 190, -170, 2, 0.10, 0.8],
+            
+            # Electric Fan (50-100W, sustained)
+            [70, 10, 85, 55, 68, 3, 5, 12, -10, 0, 0.14, 0.8],
+            [65, 9, 80, 50, 63, 2, 4, 10, -9, 0, 0.14, 0.8],
+            [80, 12, 95, 65, 78, 4, 6, 14, -12, 0, 0.15, 1.0],
+            
+            # Ceiling Fan (50-120W, sustained)
+            [85, 15, 110, 60, 82, 5, 8, 18, -15, 0, 0.18, 0.8],
+            [90, 16, 115, 65, 88, 6, 9, 20, -17, 0, 0.18, 0.8],
+            
+            # Hair Dryer (1500-2000W, short bursts)
+            [1750, 180, 1950, 1500, 1730, 120, 100, 320, -280, 2, 0.10, 1.0],
+            [1700, 170, 1900, 1450, 1680, 115, 95, 310, -270, 2, 0.10, 1.0],
+            
+            # Desktop Computer (200-500W, sustained)
+            [300, 40, 380, 220, 295, 15, 25, 60, -50, 1, 0.13, 0.8],
+            [350, 45, 430, 270, 345, 18, 28, 65, -55, 1, 0.13, 0.8],
+            
+            # Laptop (50-100W, sustained)
+            [70, 15, 95, 45, 68, 8, 10, 25, -22, 0, 0.21, 0.8],
+            [65, 14, 90, 40, 63, 7, 9, 23, -20, 0, 0.22, 0.8],
+            
+            # TV 32" LED (50-100W, sustained)
+            [75, 12, 95, 55, 73, 5, 8, 18, -15, 0, 0.16, 0.8],
+            [70, 11, 90, 50, 68, 4, 7, 16, -14, 0, 0.16, 1.0],
+            
+            # TV 55" LED (100-200W, sustained)
+            [140, 20, 175, 105, 138, 8, 12, 30, -28, 0, 0.14, 0.8],
+            [150, 22, 185, 115, 148, 9, 13, 32, -30, 0, 0.15, 1.0],
+            
+            # LED Bulbs (10-20W, constant)
+            [15, 2, 18, 12, 15, 1, 1, 3, -2, 0, 0.13, 0.8],
+            [12, 1, 14, 10, 12, 0, 1, 2, -2, 0, 0.08, 1.0],
+            
+            # Fluorescent Tubes (30-60W, constant)
+            [45, 5, 52, 38, 44, 2, 3, 7, -6, 0, 0.11, 0.8],
+            [50, 6, 58, 42, 49, 2, 3, 8, -7, 0, 0.12, 1.0],
+            
+            # Printer (300-500W, short intermittent)
+            [400, 120, 520, 280, 390, 80, 70, 180, -160, 2, 0.30, 0.8],
+            [380, 115, 500, 260, 370, 75, 68, 170, -150, 2, 0.30, 0.8],
+            
+            # Water Pump (750-1500W, intermittent cycling)
+            [1100, 200, 1400, 800, 1080, 100, 120, 350, -320, 2, 0.18, 0.7],
+            [1000, 180, 1300, 700, 980, 90, 110, 330, -300, 2, 0.18, 0.7],
+            [1200, 220, 1500, 900, 1180, 110, 130, 370, -340, 2, 0.18, 0.8],
+            
+            # Pool Pump (1000-1350W, sustained, very stable)
+            [1200, 50, 1300, 1100, 1190, 10, 30, 80, -70, 0, 0.04, 0.7],
+            [1150, 45, 1250, 1050, 1140, 8, 28, 75, -65, 0, 0.04, 0.7],
+            [1250, 55, 1350, 1150, 1240, 12, 32, 85, -75, 0, 0.04, 0.8],
+            
+            # Router/Modem (10-30W, constant)
+            [18, 3, 22, 14, 18, 1, 2, 4, -3, 0, 0.17, 0.7],
+            [20, 3, 24, 16, 20, 1, 2, 4, -4, 0, 0.15, 0.7],
+            
+            # Security System (20-50W, constant)
+            [35, 5, 42, 28, 34, 2, 3, 7, -6, 0, 0.14, 0.7],
+            [32, 4, 38, 26, 31, 1, 2, 6, -5, 0, 0.13, 0.7],
         ]
         
         seed_labels = [
-            'idle', 'idle',
-            'lights_tv', 'lights_tv',
-            'kettle', 'kettle',
-            'pool_pump', 'pool_pump',
-            'cooking', 'cooking',
-            'water_heater', 'water_heater',
-            'ac', 'ac',
-            'multiple_loads', 'multiple_loads'
+            # Idle
+            'idle', 'idle', 'idle',
+            # Multiple
+            'multiple_loads', 'multiple_loads', 'multiple_loads',
+            # Kitchen
+            'microwave', 'microwave',
+            'electric_kettle', 'electric_kettle', 'electric_kettle',
+            'toaster', 'toaster',
+            'rice_cooker', 'rice_cooker',
+            'blender', 'blender',
+            'coffee_maker', 'coffee_maker',
+            # Cooling
+            'refrigerator', 'refrigerator', 'refrigerator',
+            'freezer', 'freezer',
+            # Laundry
+            'washing_machine', 'washing_machine', 'washing_machine',
+            'iron', 'iron',
+            'vacuum_cleaner', 'vacuum_cleaner',
+            # Comfort
+            'electric_fan', 'electric_fan', 'electric_fan',
+            'ceiling_fan', 'ceiling_fan',
+            # Personal Care
+            'hair_dryer', 'hair_dryer',
+            # Electronics
+            'desktop_computer', 'desktop_computer',
+            'laptop', 'laptop',
+            'tv_32', 'tv_32',
+            'tv_55', 'tv_55',
+            # Lighting
+            'led_bulbs', 'led_bulbs',
+            'fluorescent_tubes', 'fluorescent_tubes',
+            # Office
+            'printer', 'printer',
+            # Utility
+            'water_pump', 'water_pump', 'water_pump',
+            'pool_pump', 'pool_pump', 'pool_pump',
+            'router', 'router',
+            'security_system', 'security_system',
         ]
         
         self.training_data = seed_data
@@ -305,18 +461,24 @@ class ApplianceDetector:
     
     def _simple_fallback_detection(self, current_load):
         """Simple rule-based fallback when ML is not ready"""
-        if current_load < 150:
+        if current_load < 50:
             return ["Idle"]
-        elif 150 <= current_load < 800:
-            return ["Lights/TV"]
-        elif 800 <= current_load < 1400:
-            return ["Pool Pump or AC"]
+        elif 50 <= current_load < 150:
+            return ["Router/Lights/Chargers"]
+        elif 150 <= current_load < 400:
+            return ["Refrigerator/Freezer/Lights"]
+        elif 400 <= current_load < 800:
+            return ["TV/Computer/Fans"]
+        elif 800 <= current_load < 1100:
+            return ["Microwave/Vacuum/Iron"]
+        elif 1100 <= current_load < 1400:
+            return ["Pool Pump/Washing Machine"]
         elif 1400 <= current_load < 1800:
-            return ["Water Heater or Cooking"]
+            return ["Iron/Hair Dryer/Kettle"]
         elif 1800 <= current_load < 2500:
-            return ["Kettle or Cooking"]
+            return ["Kettle/Toaster/Cooking"]
         elif 2500 <= current_load < 3500:
-            return ["Water Heater"]
+            return ["Heavy Cooking/Multiple Loads"]
         else:
             return ["Multiple Appliances"]
     
