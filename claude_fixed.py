@@ -1201,7 +1201,11 @@ def poll_growatt():
                                         }
                                         inv_data.append(info)
 
-                                        if inv_cfg['type'] == 'primary': p_caps.append(cap)
+                                        if inv_cfg['type'] == 'primary': 
+                                            p_caps.append(cap)
+                                            # For Nairobi site, check primary inverter for grid/gen
+                                            if site_id == 'nairobi' and float(d.get("pAcInPut") or 0) > 50: 
+                                                gen_on = True
                                         elif inv_cfg['type'] == 'backup':
                                             b_data = info
                                             if float(d.get("vac") or 0) > 100 or float(d.get("pAcInPut") or 0) > 50: gen_on = True
