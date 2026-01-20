@@ -652,12 +652,8 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
         # ABSOLUTE BLOCKERS (same as recommendations)
         if gen_on:
             if site_id == 'nairobi':
-                decision.update({
-                    "msg": "Utility Power", 
-                    "status": "unsafe",
-                    "color": "var(--crit)",
-                    "reason": "Utility/Gen running - monitor usage"
-                })
+                # Utility power is normal for Nairobi - allow loads
+                pass  # Don't block, continue to other checks
             else:
                 decision.update({
                     "msg": "Generator On", 
@@ -665,6 +661,14 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
                     "color": "var(--crit)",
                     "reason": "Generator running - no loads"
                 })
+        elif site_id == 'nairobi':
+            # No utility power in Nairobi = grid failure
+            decision.update({
+                "msg": "Grid Failure", 
+                "status": "unsafe",
+                "color": "var(--crit)",
+                "reason": "No utility power - battery only"
+            })
         elif b_active:
             decision.update({
                 "msg": "Backup Active", 
@@ -1088,12 +1092,16 @@ def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run, site_id='
             send_email(f"🌡️ High Temp: {inv['Label']}", f"Temp: {inv['temperature']}", "high_temperature")
     
     # Critical: Generator or backup voltage low
-    if gen_run or (b_volt < 51.2 and b_volt > 10): # >10 to filter out 0V readings
-        if site_id == 'nairobi':
-            send_email("🚨 CRITICAL: Utility Power Running", "Monitor usage", "critical")
-        else:
+    if site_id == 'nairobi':
+        # For Nairobi: Alert if NO utility power (grid failure)
+        if not gen_run:
+            send_email("🚨 CRITICAL: Grid Failure", "No utility power - running on battery", "critical")
+            return
+    else:
+        # For Kajiado: Alert if generator IS running
+        if gen_run or (b_volt < 51.2 and b_volt > 10): # >10 to filter out 0V readings
             send_email("🚨 CRITICAL: Generator Running", "Backup critical", "critical")
-        return
+            return
     
     # High alert: Backup active with low primary
     if b_active and p_cap < 40:
@@ -1613,9 +1621,11 @@ def home():
     st_txt, st_col = "NORMAL", "var(--info)"
     if gen_on: 
         if site_id == 'nairobi':
-            st_txt, st_col = "UTILITY ON", "var(--crit)"
+            st_txt, st_col = "UTILITY ON", "var(--good)"  # Normal for Nairobi
         else:
-            st_txt, st_col = "GENERATOR ON", "var(--crit)"
+            st_txt, st_col = "GENERATOR ON", "var(--crit)"  # Critical for Kajiado
+    elif site_id == 'nairobi':
+        st_txt, st_col = "UTILITY OFF - GRID FAILURE", "var(--crit)"  # Critical for Nairobi
     elif p_pct < 40: st_txt, st_col = "BACKUP ACTIVE", "var(--warn)"
     elif solar > load + 500: st_txt, st_col = "CHARGING", "var(--success)"
 
@@ -1706,9 +1716,11 @@ def home():
     
     if gen_on:
         if site_id == 'nairobi':
-            recommendation_items.append({'icon': '🚨', 'title': 'UTILITY POWER ACTIVE', 'description': 'Utility/Gen running - monitor usage', 'class': 'critical'})
+            recommendation_items.append({'icon': '✅', 'title': 'UTILITY POWER ACTIVE', 'description': 'Grid power available - normal operation', 'class': 'good'})
         else:
             recommendation_items.append({'icon': '🚨', 'title': 'NO HEAVY LOADS', 'description': 'Generator running - turn off all non-essential appliances', 'class': 'critical'})
+    elif site_id == 'nairobi':
+        recommendation_items.append({'icon': '🚨', 'title': 'GRID FAILURE', 'description': 'No utility power - running on battery only', 'class': 'critical'})
     elif b_active:
         recommendation_items.append({'icon': '⚠️', 'title': 'MINIMIZE LOADS', 'description': 'Backup battery active - essential loads only', 'class': 'warning'})
     elif is_night:
