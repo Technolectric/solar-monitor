@@ -124,67 +124,22 @@ class ApplianceDetector:
                 'monitor', 'projector', 'router', 'switch', 'ups'
             ]
         else:
-            # Comprehensive appliance categories for home
             self.APPLIANCE_CLASSES = [
-                # Basic States
-                'idle',
-                'multiple_loads',
-                
-                # Kitchen Appliances (25)
-                'microwave', 'electric_kettle', 'toaster', 'toaster_oven', 'coffee_maker',
-                'rice_cooker', 'slow_cooker', 'pressure_cooker', 'blender', 'food_processor',
-                'stand_mixer', 'hand_mixer', 'bread_maker', 'juicer', 'electric_grill',
-                'sandwich_maker', 'waffle_maker', 'deep_fryer', 'electric_wok', 'hot_plate',
-                'induction_cooker', 'garbage_disposal', 'electric_can_opener', 'food_warmer', 'egg_cooker',
-                
-                # Cooling/Refrigeration (8)
-                'refrigerator', 'freezer', 'mini_fridge', 'wine_cooler', 'ice_maker',
-                'chest_freezer', 'commercial_fridge', 'beverage_cooler',
-                
-                # Laundry & Cleaning (10)
-                'washing_machine', 'dryer', 'iron', 'steamer', 'vacuum_cleaner',
-                'carpet_cleaner', 'steam_mop', 'spin_dryer', 'garment_steamer', 'handheld_vacuum',
-                
-                # Heating & Comfort (10)
-                'electric_fan', 'ceiling_fan', 'tower_fan', 'table_fan', 'box_fan',
-                'exhaust_fan', 'humidifier', 'dehumidifier', 'electric_heater', 'space_heater',
-                
-                # Personal Care (10)
-                'hair_dryer', 'hair_straightener', 'curling_iron', 'electric_shaver', 'toothbrush_charger',
-                'hair_clippers', 'facial_steamer', 'hot_comb', 'electric_nail_file', 'foot_spa',
-                
-                # Electronics & Entertainment (15)
-                'desktop_computer', 'laptop', 'gaming_console', 'tv_32', 'tv_55',
-                'tv_plasma', 'sound_system', 'stereo', 'bluetooth_speaker', 'projector',
-                'dvd_player', 'cable_box', 'satellite_decoder', 'gaming_pc', 'monitor',
-                
-                # Lighting (8)
-                'led_bulbs', 'led_strips', 'fluorescent_tubes', 'cfl_bulbs', 'halogen_bulbs',
-                'incandescent_bulbs', 'desk_lamp', 'floor_lamp',
-                
-                # Office & Work (8)
-                'printer', 'scanner', 'fax_machine', 'paper_shredder', 'laminator',
-                'label_maker', 'pencil_sharpener', 'photocopier',
-                
-                # Utility & Infrastructure (6)
-                'water_pump', 'pool_pump', 'borehole_pump', 'sump_pump', 'router', 'security_system'
+                'idle', 'multiple_loads', 'microwave', 'electric_kettle', 'toaster', 
+                'refrigerator', 'freezer', 'washing_machine', 'dryer', 'iron', 
+                'electric_fan', 'ceiling_fan', 'hair_dryer', 'tv_55', 'water_pump', 
+                'pool_pump', 'borehole_pump', 'security_system'
             ]
         
-        # Training data for initial model (load, duration, spike_rate, variance) -> class
         self.training_data = []
         self.training_labels = []
-        
-        # Feature window for pattern analysis
-        self.feature_window = 10  # Analyze last 10 data points
-        
+        self.feature_window = 10
         self.load_model()
         
     def load_model(self):
-        """Load trained ML models if they exist"""
         if Path(self.model_file).exists():
             try:
                 with self.model_lock:
-                    # Check if file is empty
                     if os.path.getsize(self.model_file) > 0:
                         models = joblib.load(self.model_file)
                         self.appliance_classifier = models.get('appliance_classifier')
@@ -202,36 +157,17 @@ class ApplianceDetector:
             self.init_default_models()
     
     def init_default_models(self):
-        """Initialize default models with seed training data"""
-        self.appliance_classifier = RandomForestClassifier(
-            n_estimators=100, 
-            max_depth=10,
-            random_state=42
-        )
-        
-        # Seed with comprehensive patterns for common appliances
-        # Features: [mean_load, std, max, min, median, rate_change, change_std, max_spike, min_spike, spike_count, coef_var, time_factor]
+        self.appliance_classifier = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
         seed_data = [
-            # Idle (0-150W)
             [50, 20, 100, 10, 45, 5, 10, 20, -15, 0, 0.4, 0.7],
-            [30, 15, 80, 5, 28, 3, 8, 15, -10, 0, 0.5, 0.7],
-            [75, 25, 120, 20, 70, 8, 12, 30, -20, 0, 0.33, 0.5],
-            
-            # Multiple loads (complex, high variance)
             [3500, 600, 4200, 2800, 3400, 200, 400, 800, -600, 3, 0.17, 0.8],
-            [4000, 700, 5000, 3000, 3900, 250, 450, 900, -700, 4, 0.18, 0.75],
         ]
+        seed_labels = ['idle', 'multiple_loads']
         
-        seed_labels = ['idle', 'idle', 'idle', 'multiple_loads', 'multiple_loads']
-        
-        # Add simpler defaults for office to avoid crashes if empty
         if self.appliance_type == 'office':
             office_seeds = [
-                 # Computer (200W)
                 [200, 40, 380, 120, 195, 15, 25, 60, -50, 1, 0.13, 0.8],
-                # Printer (800W peak)
                 [400, 120, 800, 280, 390, 80, 70, 180, -160, 2, 0.30, 0.8],
-                # AC (1800W)
                 [1800, 50, 1850, 1750, 1800, 10, 20, 50, -50, 0, 0.03, 0.8]
             ]
             office_labels = ['desktop_computer', 'printer', 'air_conditioner_split']
@@ -241,17 +177,14 @@ class ApplianceDetector:
         self.training_data = seed_data
         self.training_labels = seed_labels
         
-        # Train initial model
         X = np.array(seed_data)
         y = np.array(seed_labels)
         self.scaler.fit(X)
         X_scaled = self.scaler.transform(X)
         self.appliance_classifier.fit(X_scaled, y)
-        
         print(f"✅ Initialized ML appliance models with seed data for {self.appliance_type}", flush=True)
     
     def save_model(self):
-        """Save trained models to disk"""
         try:
             with self.model_lock:
                 models = {
@@ -266,147 +199,87 @@ class ApplianceDetector:
             print(f"⚠️ Failed to save ML models: {e}", flush=True)
     
     def extract_features(self, load_data, time_data=None):
-        """
-        Extract features from load data for appliance classification.
-        Features capture the signature of different appliances.
-        """
         features = []
-        
-        if len(load_data) == 0:
-            return [0] * 12
-        
-        # Basic statistical features
-        features.append(np.mean(load_data))      # Mean load
-        features.append(np.std(load_data))       # Variability
-        features.append(np.max(load_data))       # Peak load
-        features.append(np.min(load_data))       # Minimum load
-        features.append(np.median(load_data))    # Median
-        
-        # Rate of change features (detect spikes vs gradual)
+        if len(load_data) == 0: return [0] * 12
+        features.append(np.mean(load_data))
+        features.append(np.std(load_data))
+        features.append(np.max(load_data))
+        features.append(np.min(load_data))
+        features.append(np.median(load_data))
         if len(load_data) > 1:
             changes = np.diff(load_data)
-            features.append(np.mean(changes))     # Average rate of change
-            features.append(np.std(changes))      # Change volatility
-            features.append(np.max(changes))      # Max spike up
-            features.append(np.min(changes))      # Max spike down
-            
-            # Spike detection (sudden changes > 500W)
+            features.append(np.mean(changes))
+            features.append(np.std(changes))
+            features.append(np.max(changes))
+            features.append(np.min(changes))
             large_changes = np.abs(changes) > 500
-            features.append(np.sum(large_changes))  # Spike count
-            
-            # Pattern stability (low = stable like pool pump, high = cycling like AC)
+            features.append(np.sum(large_changes))
             if np.mean(load_data) > 0:
-                features.append(np.std(load_data) / np.mean(load_data))  # Coefficient of variation
+                features.append(np.std(load_data) / np.mean(load_data))
             else:
                 features.append(0)
         else:
             features.extend([0, 0, 0, 0, 0, 0])
-        
-        # Time-based feature (if available)
         if time_data:
             hour = time_data.hour
-            features.append(1.0 if 6 <= hour <= 22 else 0.5)  # Day vs night factor
+            features.append(1.0 if 6 <= hour <= 22 else 0.5)
         else:
-            features.append(0.7)  # Default
-        
-        # Pad or trim to 12 features
+            features.append(0.7)
         while len(features) < 12:
             features.append(0)
-        
         return features[:12]
     
     def detect_appliances(self, current_load, previous_load=0):
-        """
-        ML-based appliance detection using pattern recognition.
-        Returns: List of detected appliance names with confidence scores
-        """
         try:
             now = datetime.now(EAT)
-            
-            # Add current load to history
-            self.load_history.append({
-                'timestamp': now,
-                'load': current_load
-            })
-            
-            # Need enough data for pattern analysis
+            self.load_history.append({'timestamp': now, 'load': current_load})
             if len(self.load_history) < self.feature_window:
                 return self._simple_fallback_detection(current_load)
             
-            # Get recent load pattern
             recent_loads = [item['load'] for item in list(self.load_history)[-self.feature_window:]]
-            
-            # Extract features from pattern
             features = self.extract_features(recent_loads, now)
             
-            # Use ML classifier to predict appliance type
             try:
                 features_scaled = self.scaler.transform([features])
                 predicted_class = self.appliance_classifier.predict(features_scaled)[0]
                 confidence = np.max(self.appliance_classifier.predict_proba(features_scaled))
                 
-                # Format output
                 detected = []
-                
-                # Only report if confidence is reasonable
                 if confidence > 0.4:
                     appliance_name = predicted_class.replace('_', ' ').title()
                     detected.append(f"{appliance_name}")
-                    
-                    # Check for multiple appliances (high load + high variance)
                     if current_load > 3000 and np.std(recent_loads) > 500:
                         if predicted_class != 'multiple_loads':
                             detected.append("+ Other Loads")
                 else:
-                    # Low confidence - use simple detection
                     detected = self._simple_fallback_detection(current_load)
-                
                 return detected
-                
             except Exception as e:
                 print(f"⚠️ ML classification error: {e}", flush=True)
                 return self._simple_fallback_detection(current_load)
-            
         except Exception as e:
             print(f"⚠️ Appliance detection error: {e}", flush=True)
             return ["System Error"]
     
     def _simple_fallback_detection(self, current_load):
-        """Simple rule-based fallback when ML is not ready"""
-        if current_load < 50:
-            return ["Idle"]
-        elif 50 <= current_load < 150:
-            return ["Lights/Router"]
-        elif 150 <= current_load < 400:
-            return ["Computer/Screens"] if self.appliance_type == 'office' else ["Fridge/Lights"]
-        elif 400 <= current_load < 800:
-            return ["Servers/Printers"] if self.appliance_type == 'office' else ["TV/Computer"]
-        elif 800 <= current_load < 1500:
-            return ["AC/Microwave"] if self.appliance_type == 'office' else ["Microwave/Kettle"]
-        else:
-            return ["High Load/Multiple"]
+        if current_load < 50: return ["Idle"]
+        elif 50 <= current_load < 150: return ["Lights/Router"]
+        elif 150 <= current_load < 400: return ["Computer/Screens"] if self.appliance_type == 'office' else ["Fridge/Lights"]
+        elif 400 <= current_load < 800: return ["Servers/Printers"] if self.appliance_type == 'office' else ["TV/Computer"]
+        elif 800 <= current_load < 1500: return ["AC/Microwave"] if self.appliance_type == 'office' else ["Microwave/Kettle"]
+        else: return ["High Load/Multiple"]
     
     def train_from_feedback(self, feedback_data):
-        """Improve models based on user feedback."""
         try:
-            if not feedback_data.get('actual_appliance') or not feedback_data.get('load_pattern'):
-                return
-            
-            # Extract features from the corrected pattern
+            if not feedback_data.get('actual_appliance') or not feedback_data.get('load_pattern'): return
             load_pattern = feedback_data['load_pattern']
             timestamp = datetime.fromisoformat(feedback_data['timestamp']) if isinstance(feedback_data['timestamp'], str) else feedback_data['timestamp']
             features = self.extract_features(load_pattern, timestamp)
-            
-            # Add to training data
             self.training_data.append(features)
             self.training_labels.append(feedback_data['actual_appliance'])
-            
-            # Keep training set manageable
             if len(self.training_data) > 500:
                 self.training_data = self.training_data[-500:]
                 self.training_labels = self.training_labels[-500:]
-            
-            # Retrain model if we have enough diverse data
             if len(self.training_data) >= 20:
                 X = np.array(self.training_data)
                 y = np.array(self.training_labels)
@@ -415,7 +288,6 @@ class ApplianceDetector:
                 self.appliance_classifier.fit(X_scaled, y)
                 self.save_model()
                 print(f"✅ ML model retrained with {len(self.training_data)} examples", flush=True)
-            
         except Exception as e:
             print(f"⚠️ Feedback training error: {e}", flush=True)
 
@@ -431,7 +303,6 @@ class PersistentLoadManager:
         if Path(self.filename).exists():
             try:
                 with open(self.filename, 'r') as f:
-                    # Check for empty file
                     if os.path.getsize(self.filename) == 0:
                         return {"weekday": {str(h): [] for h in range(24)}, "weekend": {str(h): [] for h in range(24)}}
                     return json.load(f)
@@ -502,10 +373,6 @@ class DailyHistoryManager:
         return self.hourly_data
 
     def update_daily(self, date_str, total_consumption_wh, total_solar_wh, actual_irradiance_wh):
-        """
-        Updated to use actual irradiance instead of theoretical maximum
-        actual_irradiance_wh: Sum of hourly irradiance * panel capacity for the day
-        """
         if date_str not in self.history:
             self.history[date_str] = {
                 'consumption': 0,
@@ -540,12 +407,8 @@ class DailyHistoryManager:
         return result
 
 def identify_active_appliances(current, previous, gen_active, backup_volts, primary_pct, ml_detector_instance, site_id='kajiado'):
-    """
-    Enhanced detection using ML appliance classifier
-    """
     detected = []
     
-    # CRITICAL: Manual generator detection
     if gen_active:
         if primary_pct > 42:
             if site_id == 'nairobi':
@@ -554,15 +417,13 @@ def identify_active_appliances(current, previous, gen_active, backup_volts, prim
                 detected.append("Generator Load")
         else: 
             detected.append("System Charging")
-        return detected  # Return early if generator is on
+        return detected
     
-    # Use ML detector for appliance classification
     appliances = ml_detector_instance.detect_appliances(current, previous)
     
     if appliances:
         detected = appliances
     else:
-        # Fallback
         if current < 100: 
             detected.append("Idle")
         else:
@@ -582,30 +443,22 @@ APPLIANCE_PROFILES = [
 ]
 
 def get_energy_status(p_pct, b_volts, site_config):
-    """
-    Centralized physics engine to calculate system state.
-    Used by both current status (donut) and simulation (forecast).
-    """
     p_total_wh = site_config["primary_battery_wh"]
     b_total_wh = site_config["backup_battery_wh"] * site_config["backup_degradation"]
 
-    # Calculate current Wh
     curr_p_wh = (p_pct / 100.0) * p_total_wh
     
-    # Handle sites with no backup battery (e.g., Nairobi)
     b_pct = 0
     curr_b_wh = 0
     if b_total_wh > 0:
         b_pct = max(0, min(100, (b_volts - 51.0) / 2.0 * 100))
         curr_b_wh = (b_pct / 100.0) * b_total_wh
 
-    # Calculate Capacities (Tiers)
     primary_tier1_capacity = p_total_wh * 0.60
     backup_capacity = b_total_wh * 0.80
     emergency_capacity = p_total_wh * 0.20
     total_system_capacity = primary_tier1_capacity + backup_capacity + emergency_capacity
 
-    # Calculate Available Energy (Tiers)
     primary_tier1_available = max(0, curr_p_wh - (p_total_wh * 0.40))
     backup_available = 0
     if b_total_wh > 0:
@@ -615,7 +468,6 @@ def get_energy_status(p_pct, b_volts, site_config):
     total_available = primary_tier1_available + backup_available + emergency_available
     total_pct = (total_available / total_system_capacity * 100) if total_system_capacity > 0 else 0
 
-    # Determine Active Tier
     if primary_tier1_available > 0: active_tier = 'primary'
     elif backup_available > 0: active_tier = 'backup'
     elif emergency_available > 0: active_tier = 'reserve'
@@ -633,7 +485,6 @@ def get_energy_status(p_pct, b_volts, site_config):
 
 def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now_hour=None, 
                            heavy_loads_safe=False, gen_on=False, b_active=False, site_id='kajiado'):
-    """Smart appliance scheduler - properly coordinated with recommendations."""
     battery_kwh_available = status['total_available_wh'] / 1000
     battery_soc_pct = status['total_pct']
     primary_pct = status.get('primary_battery_pct', 0)
@@ -649,14 +500,11 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
         app_kw = app["watts"] / 1000
         app_kwh_required = (app["watts"] * app["hours"]) / 1000
         
-        # Default to unsafe
         decision = {"msg": "Wait", "status": "unsafe", "color": "var(--warn)", "reason": ""}
         
-        # ABSOLUTE BLOCKERS (same as recommendations)
         if gen_on:
             if site_id == 'nairobi':
-                # Utility power is normal for Nairobi - allow loads
-                pass  # Don't block, continue to other checks
+                pass 
             else:
                 decision.update({
                     "msg": "Generator On", 
@@ -665,7 +513,6 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
                     "reason": "Generator running - no loads"
                 })
         elif site_id == 'nairobi':
-            # No utility power in Nairobi = grid failure
             decision.update({
                 "msg": "Grid Failure", 
                 "status": "unsafe",
@@ -687,7 +534,6 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
                 "reason": f"System at {battery_soc_pct:.0f}%"
             })
         
-        # Heavy Loads (>1500W) - STRICT RULES
         elif app["watts"] > 1500:
             if is_night or is_past_4pm:
                 decision.update({
@@ -718,7 +564,6 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
                     "reason": "Need solar window or >85% battery"
                 })
         
-        # Moderate Loads (800-1500W)
         elif app["watts"] >= 800:
             if is_night and battery_soc_pct < 60:
                 decision.update({
@@ -742,7 +587,6 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
                     "reason": "Conditions not optimal"
                 })
         
-        # Light Loads (<800W)
         else:
             if is_night and battery_soc_pct < 50:
                 decision.update({
@@ -778,18 +622,14 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
     return advice
 
 def calculate_battery_breakdown(p_pct, b_volts, site_config):
-    """Calculates breakdown for circular chart using centralized logic."""
     status = get_energy_status(p_pct, b_volts, site_config)
     
-    # Check if backup battery exists
     if site_config.get("backup_battery_wh", 0) > 0:
         chart_data = [round(x / 1000, 1) for x in status['breakdown_wh']]
         tier_labels = ['Primary', 'Backup', 'Reserve']
         tier_colors = ['rgba(16, 185, 129, 0.9)', 'rgba(59, 130, 246, 0.8)', 'rgba(245, 158, 11, 0.8)']
     else:
-        # If no backup, remove the middle element (Backup) from breakdown
         wh_list = status['breakdown_wh']
-        # breakdown_wh is [primary, backup, reserve] -> take [0] and [2]
         chart_data = [round(wh_list[0] / 1000, 1), round(wh_list[2] / 1000, 1)]
         tier_labels = ['Primary', 'Reserve']
         tier_colors = ['rgba(16, 185, 129, 0.9)', 'rgba(245, 158, 11, 0.8)']
@@ -807,34 +647,25 @@ def calculate_battery_breakdown(p_pct, b_volts, site_config):
     }
 
 def calculate_battery_cascade(solar, load, p_pct, b_volts, site_config):
-    """
-    Simulates battery levels. 
-    CRITICAL: Anchors the first data point to current breakdown state.
-    """
     if not solar or not load: return {'labels': [], 'data': [], 'tiers': []}
 
-    # 1. Initialize logic with current state
     start_status = get_energy_status(p_pct, b_volts, site_config)
 
     curr_p_wh = start_status['curr_p_wh']
     curr_b_wh = start_status['curr_b_wh']
 
-    # Constants
     p_total_wh = site_config["primary_battery_wh"]
     b_total_wh = site_config["backup_battery_wh"] * site_config["backup_degradation"]
 
-    # 2. Set Start Points (Time 0)
     sim_data = [start_status['total_pct']]
-    sim_labels = ["Now"] # Corresponds to current state
+    sim_labels = ["Now"]
     tier_info = [start_status['active_tier']]
 
-    # 3. Simulate future steps
     count = min(len(solar), len(load))
 
     for i in range(count):
         net = solar[i]['estimated_generation'] - load[i]['estimated_load']
 
-        # Apply physics
         if net > 0:
             space_in_primary = p_total_wh - curr_p_wh
             if net <= space_in_primary:
@@ -846,7 +677,6 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts, site_config):
                     curr_b_wh = min(b_total_wh, curr_b_wh + overflow)
         else:
             drain = abs(net)
-            # Tier 1 Drain
             primary_min = p_total_wh * 0.40
             available_tier1 = max(0, curr_p_wh - primary_min)
 
@@ -857,7 +687,6 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts, site_config):
                 curr_p_wh = primary_min
                 drain -= available_tier1
 
-            # Tier 2 Drain (Only if backup exists)
             if drain > 0 and b_total_wh > 0:
                 backup_min = b_total_wh * 0.20
                 available_backup = max(0, curr_b_wh - backup_min)
@@ -869,7 +698,6 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts, site_config):
                     curr_b_wh = backup_min
                     drain -= available_backup
 
-            # Tier 3 Drain
             if drain > 0:
                 emergency_min = p_total_wh * 0.20
                 available_emergency = max(0, curr_p_wh - emergency_min)
@@ -879,7 +707,6 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts, site_config):
                 else:
                     curr_p_wh = emergency_min
 
-        # Calculate resulting state percentage
         primary_tier1_avail = max(0, curr_p_wh - (p_total_wh * 0.40))
         backup_avail = 0
         if b_total_wh > 0:
@@ -891,13 +718,11 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts, site_config):
 
         percentage = (total_available / total_capacity) * 100 if total_capacity > 0 else 0
 
-        # Determine active tier
         if primary_tier1_avail > 0: active_tier = 'primary'
         elif backup_avail > 0: active_tier = 'backup'
         elif emergency_avail > 0: active_tier = 'reserve'
         else: active_tier = 'empty'
 
-        # Add point
         sim_data.append(percentage)
         sim_labels.append(solar[i]['time'].strftime('%H:%M'))
         tier_info.append(active_tier)
@@ -909,16 +734,9 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts, site_config):
 # ----------------------------
 headers_template = {"Content-Type": "application/x-www-form-urlencoded"}
 last_alert_time, alert_history = {}, []
-
-site_latest_data = {}  # Changed to handle multi-site data
+site_latest_data = {}
 
 def get_weather_forecast(lat, lon):
-    """
-    Multi-source weather forecast with automatic fallback.
-    Tries Open-Meteo first, then WeatherAPI if it fails.
-    Returns: {'times': [...], 'rad': [...]} or None
-    """
-    # Try Open-Meteo first (free, no API key needed)
     try:
         url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=shortwave_radiation&timezone=Africa/Nairobi&forecast_days=2"
         r = requests.get(url, timeout=5).json()
@@ -927,23 +745,16 @@ def get_weather_forecast(lat, lon):
     except Exception as e:
         print(f"⚠️ Open-Meteo failed: {e}", flush=True)
     
-    # Fallback to WeatherAPI.com
     if WEATHERAPI_KEY:
         try:
-            # WeatherAPI provides solar radiation in W/m²
             url = f"https://api.weatherapi.com/v1/forecast.json?key={WEATHERAPI_KEY}&q={lat},{lon}&days=2&hour=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23"
             r = requests.get(url, timeout=5).json()
-            
-            # Parse WeatherAPI response into same format as Open-Meteo
             times = []
             radiation = []
-            
             for day in r['forecast']['forecastday']:
                 for hour in day['hour']:
                     times.append(hour['time'])
-                    # WeatherAPI gives solar_radiation directly in W/m²
                     radiation.append(hour.get('solar_radiation', 0))
-            
             print("✅ Weather data from WeatherAPI (fallback)", flush=True)
             return {'times': times, 'rad': radiation, 'source': 'WeatherAPI'}
         except Exception as e:
@@ -955,137 +766,83 @@ def get_weather_forecast(lat, lon):
     return None
 
 def generate_solar_forecast(weather_data, site_config):
-    """
-    Generate 24-hour solar forecast from weather data.
-    Handles both Open-Meteo and WeatherAPI formats.
-    """
     forecast = []
     now = datetime.now(EAT)
-    
     if not weather_data:
         print("⚠️ No weather data available - solar forecast will be empty", flush=True)
         return forecast
-    
     source = weather_data.get('source', 'Unknown')
     w_map = {t: r for t, r in zip(weather_data['times'], weather_data['rad'])}
-    
     for i in range(24):
         ft = now + timedelta(hours=i)
-        
-        # Try different time formats for compatibility
         key = ft.strftime('%Y-%m-%dT%H:00')
         rad = w_map.get(key, 0)
-        
-        # If not found, try alternative format (WeatherAPI uses different format)
         if rad == 0 and source == 'WeatherAPI':
             key_alt = ft.strftime('%Y-%m-%d %H:00')
             rad = w_map.get(key_alt, 0)
-        
-        # Convert radiation to estimated generation
-        # radiation is in W/m², convert to total system watts
         est = (rad / 1000.0) * (site_config["solar_capacity_kw"] * 1000) * SOLAR_EFFICIENCY_FACTOR
         forecast.append({'time': ft, 'estimated_generation': est})
-    
     print(f"✅ Generated solar forecast from {source}: {len(forecast)} hours", flush=True)
     return forecast
 
 def calculate_daily_irradiance_potential(weather_data, target_date, site_config):
-    """
-    Calculate the actual solar potential for a specific day based on irradiance data.
-    Returns the sum of hourly potential generation in Wh.
-    Handles both Open-Meteo and WeatherAPI formats.
-    """
     if not weather_data:
         print("⚠️ No weather data for irradiance calculation", flush=True)
         return 0
-    
     total_potential_wh = 0
     source = weather_data.get('source', 'Unknown')
     w_map = {t: r for t, r in zip(weather_data['times'], weather_data['rad'])}
-    
-    # Iterate through 24 hours of the target date
     for hour in range(24):
         dt = target_date.replace(hour=hour, minute=0, second=0, microsecond=0)
         key = dt.strftime('%Y-%m-%dT%H:00')
         rad = w_map.get(key, 0)
-        
-        # Try alternative format for WeatherAPI
         if rad == 0 and source == 'WeatherAPI':
             key_alt = dt.strftime('%Y-%m-%d %H:00')
             rad = w_map.get(key_alt, 0)
-        
-        # Calculate potential generation for this hour
         hourly_potential = (rad / 1000.0) * (site_config["solar_capacity_kw"] * 1000) * SOLAR_EFFICIENCY_FACTOR
         total_potential_wh += hourly_potential
-    
     return total_potential_wh
 
 def send_email(subject, html, alert_type="general", send_via_email=True):
-    """
-    IMPROVED: Now includes send_via_email parameter to prevent email spam
-    during manual generator operation or backup mode.
-    """
     global last_alert_time, alert_history
+    cooldown_minutes = 120
+    if "critical" in alert_type.lower(): cooldown_minutes = 60
+    elif "high_load" in alert_type.lower(): cooldown_minutes = 30
     
-    # Cooldown logic - different times for different alert severities
-    cooldown_minutes = 120  # Default 2 hours
-    if "critical" in alert_type.lower(): 
-        cooldown_minutes = 60  # 1 hour for critical
-    elif "high_load" in alert_type.lower(): 
-        cooldown_minutes = 30  # 30 min for high load
-    
-    # Check cooldown
     if alert_type in last_alert_time:
         time_since = datetime.now(EAT) - last_alert_time[alert_type]
         if time_since < timedelta(minutes=cooldown_minutes):
-            return  # Skip this alert
+            return
     
-    # Send email only if requested
     if send_via_email and RESEND_API_KEY:
         try:
             requests.post(
                 "https://api.resend.com/emails", 
                 headers={"Authorization": f"Bearer {RESEND_API_KEY}"}, 
-                json={
-                    "from": SENDER_EMAIL, 
-                    "to": [RECIPIENT_EMAIL], 
-                    "subject": subject, 
-                    "html": html
-                }
+                json={"from": SENDER_EMAIL, "to": [RECIPIENT_EMAIL], "subject": subject, "html": html}
             )
-        except: 
-            pass
+        except: pass
     
-    # Always log the alert
     now = datetime.now(EAT)
     last_alert_time[alert_type] = now
     alert_history.insert(0, {"timestamp": now, "type": alert_type, "subject": subject})
     alert_history = alert_history[:20]
 
 def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run, site_id='kajiado'):
-    """
-    Comprehensive alert checking from Render version.
-    Checks inverter health, battery status, and discharge levels.
-    """
     inv1 = next((i for i in inv_data if i['SN'] == 'RKG3B0400T'), None)
     inv2 = next((i for i in inv_data if i['SN'] == 'KAM4N5W0AG'), None)
     inv3 = next((i for i in inv_data if i['SN'] == 'JNK1CDR0KQ'), None)
     
-    # Fallback to checking any available inverter if specific ones aren't found (for different sites)
     if not any([inv1, inv2, inv3]):
-        # Use whatever inverters are available
         p_cap = 0
-        if inv_data:
-             p_cap = min([i['Capacity'] for i in inv_data])
+        if inv_data: p_cap = min([i['Capacity'] for i in inv_data])
         b_active = False
-        b_volt = 53 # Assume full if unknown
+        b_volt = 53
     else:
-        # Kajiado logic
         p_cap = min(inv1['Capacity'], inv2['Capacity']) if inv1 and inv2 else 0
         b_active = inv3['OutputPower'] > 50 if inv3 else False
         b_volt = inv3['vBat'] if inv3 else 0
     
-    # Inverter health checks
     for inv in inv_data:
         if inv.get('communication_lost'): 
             send_email(f"⚠️ Comm Lost: {inv['Label']}", "Check inverter", "communication_lost")
@@ -1094,28 +851,22 @@ def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run, site_id='
         if inv.get('high_temperature'): 
             send_email(f"🌡️ High Temp: {inv['Label']}", f"Temp: {inv['temperature']}", "high_temperature")
     
-    # Critical: Generator or backup voltage low
     if site_id == 'nairobi':
-        # For Nairobi: Alert if NO utility power (grid failure)
         if not gen_run:
             send_email("🚨 CRITICAL: Grid Failure", "No utility power - running on battery", "critical")
             return
     else:
-        # For Kajiado: Alert if generator IS running
-        if gen_run or (b_volt < 51.2 and b_volt > 10): # >10 to filter out 0V readings
+        if gen_run or (b_volt < 51.2 and b_volt > 10):
             send_email("🚨 CRITICAL: Generator Running", "Backup critical", "critical")
             return
     
-    # High alert: Backup active with low primary
     if b_active and p_cap < 40:
         send_email("⚠️ HIGH ALERT: Backup Active", "Reduce Load", "backup_active")
         return
     
-    # Warning: Primary low
     if 40 < p_cap < 50:
         send_email("⚠️ Primary Low", "Reduce Load", "warning", send_via_email=b_active)
     
-    # Discharge level alerts - only send email if backup is active
     if bat_discharge >= 4500: 
         send_email("🚨 URGENT: High Discharge", "Critical", "very_high_load", send_via_email=b_active)
     elif 2500 <= bat_discharge < 4500: 
@@ -1128,14 +879,11 @@ def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run, site_id='
 # ----------------------------
 polling_active = False
 polling_thread = None
-
-# Initialize global managers per site
 site_managers = {}
 
 def poll_growatt():
     global site_latest_data, polling_active, last_communication, site_managers
 
-    # Initialize site specific managers and data structures
     for site_id, config in SITES.items():
         if site_id not in site_managers:
             site_managers[site_id] = {
@@ -1155,14 +903,12 @@ def poll_growatt():
 
     while polling_active:
         try:
-            # Iterate through each site
             for site_id, config in SITES.items():
                 try:
                     managers = site_managers[site_id]
                     token = config["api_token"]
                     if not token: continue
 
-                    # Fetch weather for this site
                     wx_data = get_weather_forecast(config["latitude"], config["longitude"])
                     
                     now = datetime.now(EAT)
@@ -1170,7 +916,6 @@ def poll_growatt():
                     inv_data, p_caps = [], []
                     b_data, gen_on = None, False
 
-                    # Fetch data for each serial number in this site
                     for sn in config["serial_numbers"]:
                         inv_cfg = config["inverter_config"].get(sn, {"label": sn, "type": "unknown"})
                         success = False
@@ -1178,7 +923,6 @@ def poll_growatt():
                         site_headers = headers_template.copy()
                         site_headers["token"] = token
 
-                        # Retry logic
                         for attempt in range(3):
                             try:
                                 r = requests.post(API_URL, data={"storage_sn": sn}, headers=site_headers, timeout=10)
@@ -1225,7 +969,6 @@ def poll_growatt():
 
                                         if inv_cfg['type'] == 'primary': 
                                             p_caps.append(cap)
-                                            # For Nairobi site, check primary inverter grid voltage for utility presence
                                             if site_id == 'nairobi' and float(d.get("vGrid") or 0) >= 180: 
                                                 gen_on = True
                                         elif inv_cfg['type'] == 'backup':
@@ -1251,7 +994,6 @@ def poll_growatt():
                     b_volts = b_data['vBat'] if b_data else 0
                     b_act = b_data['OutputPower'] > 50 if b_data else False
 
-                    # Daily History Logic
                     current_date = now.strftime('%Y-%m-%d')
                     if managers['daily_accumulator']['last_date'] != current_date:
                         if managers['daily_accumulator']['last_date']:
@@ -1271,7 +1013,6 @@ def poll_growatt():
                     managers['daily_accumulator']['consumption_wh'] += tot_out * interval_hours
                     managers['daily_accumulator']['solar_wh'] += tot_sol * interval_hours
 
-                    # ML ENHANCED: Appliance Detection
                     detected = identify_active_appliances(tot_out, managers['prev_watts'], gen_on, b_volts, p_min, managers['ml_detector'], site_id)
                     is_manual_gen = any("Generator" in x for x in detected)
                     
@@ -1280,10 +1021,8 @@ def poll_growatt():
                     
                     managers['history_manager'].add_hourly_datapoint(now, tot_out, tot_bat, tot_sol, tot_grid)
 
-                    # ALERTS
                     check_alerts(inv_data, None, tot_sol, tot_bat, gen_on, site_id)
 
-                    # Pool pump monitoring (Only relevant if site has one, simplified logic)
                     if now.hour >= 16 and site_id == "kajiado":
                         if tot_bat > 1100:
                             if managers['pool_pump_start_time'] is None:
@@ -1297,7 +1036,6 @@ def poll_growatt():
                         else:
                             managers['pool_pump_start_time'] = None
 
-                    # Periodic saves
                     if (now - managers['last_ml_save']) > timedelta(hours=6):
                         managers['ml_detector'].save_model()
                         managers['last_ml_save'] = now
@@ -1306,15 +1044,12 @@ def poll_growatt():
                         managers['load_manager'].save_data()
                         managers['last_save'] = now
 
-                    # Forecasting & Simulation
                     l_cast = managers['load_manager'].get_forecast(24)
                     s_cast = generate_solar_forecast(wx_data, config)
 
-                    # Calculate Breakdown & Simulation
                     breakdown = calculate_battery_breakdown(p_min, b_volts, config)
                     sim_res = calculate_battery_cascade(s_cast, l_cast, p_min, b_volts, config)
 
-                    # Calculate safe window
                     heavy_loads_safe = False
                     if s_cast and l_cast:
                         best_start, best_end, current_run = None, None, 0
@@ -1375,13 +1110,13 @@ def poll_growatt():
 
                     managers['prev_watts'] = tot_out
                     
-                    # Update global dictionary for this site
                     with Lock():
                         site_latest_data[site_id] = {
                             "data": {
                                 "timestamp": now.strftime("%H:%M:%S"),
                                 "total_output_power": tot_out,
                                 "total_solar_input_W": tot_sol,
+                                "total_grid_input_W": tot_grid,  # Capture grid wattage
                                 "total_battery_discharge_W": tot_bat,
                                 "primary_battery_min": p_min,
                                 "backup_battery_voltage": b_volts,
@@ -1506,7 +1241,6 @@ def api_data():
     
     data = site_latest_data.get(site_id, {}).get('data', {})
     if not data:
-        # Return initialization placeholder with ALL fields required by frontend
         return jsonify({
             "timestamp": "Initializing...", "total_output_power": 0, "total_solar_input_W": 0,
             "primary_battery_min": 0, "backup_battery_voltage": 0, "backup_active": False,
@@ -1572,7 +1306,6 @@ def home():
         
     d = site_latest_data.get(site_id, {}).get('data', {})
     
-    # Handle uninitialized state with COMPLETE default structure
     if not d:
          d = {
             "timestamp": "Initializing...", "total_output_power": 0, "total_solar_input_W": 0,
@@ -1597,14 +1330,16 @@ def home():
     bat_dis = _n("total_battery_discharge_W")
     p_pct = _n("primary_battery_min")
     b_volt = _n("backup_battery_voltage")
+    grid_watts = _n("total_grid_input_W")
     gen_on = d.get("generator_running", False)
     detected = d.get("detected_appliances", [])
     heavy_loads_safe = d.get("heavy_loads_safe", False)
+    
+    # Determine actual grid import (threshold for noise)
+    is_importing = grid_watts > 20
 
-    # Use .get() with fallback to handle potential incomplete data during transitions
     breakdown = d.get("energy_breakdown") or {}
     
-    # Ensure all required fields exist in breakdown
     breakdown.setdefault("chart_data", [1, 0, 1])
     breakdown.setdefault("tier_labels", ['Primary', 'Backup', 'Reserve'])
     breakdown.setdefault("tier_colors", ['rgba(16, 185, 129, 0.9)', 'rgba(59, 130, 246, 0.8)', 'rgba(245, 158, 11, 0.8)'])
@@ -1622,20 +1357,27 @@ def home():
     hourly_24h = d.get("hourly_24h") or []
 
     st_txt, st_col = "NORMAL", "var(--info)"
-    if gen_on: 
-        if site_id == 'nairobi':
-            st_txt, st_col = "UTILITY ON", "var(--good)"  # Normal for Nairobi
+    
+    # NAIROBI SPECIFIC LOGIC
+    if site_id == 'nairobi':
+        if not gen_on:
+            st_txt, st_col = "GRID FAILURE - BATTERY MODE", "var(--crit)"
+        elif is_importing:
+            st_txt, st_col = "USING UTILITY POWER", "var(--backup-color)"
         else:
-            st_txt, st_col = "GENERATOR ON", "var(--crit)"  # Critical for Kajiado
-    elif site_id == 'nairobi':
-        st_txt, st_col = "UTILITY OFF - GRID FAILURE", "var(--crit)"  # Critical for Nairobi
-    elif p_pct < 40: st_txt, st_col = "BACKUP ACTIVE", "var(--warn)"
-    elif solar > load + 500: st_txt, st_col = "CHARGING", "var(--success)"
+            st_txt, st_col = "GRID AVAILABLE - SOLAR MODE", "var(--success)"
+    else:
+        # KAJIADO / OTHER LOGIC
+        if gen_on: 
+            st_txt, st_col = "GENERATOR ON", "var(--crit)" 
+        elif p_pct < 40: 
+            st_txt, st_col = "BACKUP ACTIVE", "var(--warn)"
+        elif solar > load + 500: 
+            st_txt, st_col = "CHARGING", "var(--success)"
 
     is_charging = solar > (load + 100)
     is_discharging = bat_dis > 100 or load > solar
     
-    # Calculate daytime status
     now = datetime.now(EAT)
     is_night = (now.hour < 7 or now.hour >= 18)
 
@@ -1645,11 +1387,9 @@ def home():
     backup_voltage = breakdown.get('backup_voltage', 0)
     backup_pct = breakdown.get('backup_pct', 0)
     
-    # Calculate surplus and weather conditions
     surplus_power = solar - load
     b_active = d.get("backup_active", False)
     
-    # --- 1. Calculate Safe Heavy Load Window (Schedule) ---
     schedule_items = []
     
     if s_fc and l_fc:
@@ -1713,7 +1453,6 @@ def home():
                 'class': 'warning'
             })
     
-    # --- 2. Generate Recommendations ---
     recommendation_items = []
     schedule_blocks_heavy = any('No Safe Solar' in item.get('title', '') for item in schedule_items)
     
@@ -1739,7 +1478,6 @@ def home():
     else:
         recommendation_items.append({'icon': '⚠️', 'title': 'LIMIT HEAVY LOADS', 'description': f'Insufficient net surplus or battery < 85%', 'class': 'warning'})
 
-    # HTML Template
     html = """
 <!DOCTYPE html>
 <html lang="en">
@@ -1924,7 +1662,6 @@ def home():
             transform: translateY(-1px);
         }
         
-        /* Enhanced Power Flow */
         .flow-diagram { 
             position: relative; 
             height: 320px; 
@@ -2016,7 +1753,6 @@ def home():
             100%{box-shadow:0 0 0 0 rgba(245, 158, 11, 0)} 
         }
 
-        /* Enhanced Scheduler */
         .sched-grid { 
             display: grid; 
             grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); 
@@ -2079,7 +1815,6 @@ def home():
             letter-spacing: 0.5px;
         }
         
-        /* Recommendations */
         .rec-item {
             display: flex;
             align-items: flex-start;
@@ -2100,7 +1835,6 @@ def home():
         .rec-title { font-weight: 600; margin-bottom: 0.25rem; }
         .rec-desc { font-size: 0.85rem; color: var(--text-muted); }
         
-        /* Heatmap Calendar */
         .heatmap-container {
             padding: 10px 0;
         }
@@ -2136,7 +1870,6 @@ def home():
         .heatmap-day { font-size: 0.9rem; margin-bottom: 2px; }
         .heatmap-eff { font-size: 0.65rem; opacity: 0.8; }
         
-        /* Efficiency color scale */
         .eff-0 { background: rgba(100, 116, 139, 0.3); }
         .eff-1 { background: rgba(239, 68, 68, 0.3); border-color: rgba(239, 68, 68, 0.5); }
         .eff-2 { background: rgba(245, 158, 11, 0.3); border-color: rgba(245, 158, 11, 0.5); }
@@ -2189,7 +1922,6 @@ def home():
             color: var(--text-dim);
         }
         
-        /* Chart improvements */
         canvas {
             filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.2));
         }
@@ -2210,25 +1942,30 @@ def home():
         </div>
 
         <div class="grid">
-            <!-- VISUAL POWER FLOW -->
             <div class="col-12 card">
                 <div class="card-title">Real-Time Energy Flow</div>
                 <div class="flow-diagram">
                     <div class="line line-v l-solar {{ 'flow-down' if solar > 50 else '' }}"><div class="dot"></div></div>
                     <div class="line line-v l-bat {{ 'flow-down' if is_charging else ('flow-up' if is_discharging else '') }}"><div class="dot"></div></div>
                     <div class="line line-h l-home {{ 'flow-right' if load > 100 else '' }}"><div class="dot"></div></div>
-                    <div class="line line-h l-gen {{ 'flow-right' if gen_on else '' }}"><div class="dot"></div></div>
+                    <div class="line line-h l-gen {{ 'flow-right' if (site_id == 'nairobi' and is_importing) or (site_id != 'nairobi' and gen_on) else '' }}"><div class="dot"></div></div>
                     
                     <div class="node n-solar {{ 'pulse-y' if solar > 50 else '' }}">
                         <div class="node-icon">☀️</div>
                         <div class="node-val">{{ '%0.f'|format(solar) }}W</div>
                     </div>
-                    <div class="node n-gen {{ 'pulse-r' if gen_on else '' }}">
-                        <div class="node-icon">⚙️</div>
-                        <div class="node-val">{{ 'ON' if gen_on else 'OFF' }}</div>
+                    <div class="node n-gen {{ 'pulse-r' if (site_id != 'nairobi' and gen_on) else '' }}" style="{{ 'border-color:var(--info);' if site_id == 'nairobi' and gen_on else '' }}">
+                        <div class="node-icon">{{ '🏭' if site_id == 'nairobi' else '⚙️' }}</div>
+                        <div class="node-val">
+                            {% if site_id == 'nairobi' %}
+                                {{ '%0.f'|format(grid_watts) }}W
+                            {% else %}
+                                {{ 'ON' if gen_on else 'OFF' }}
+                            {% endif %}
+                        </div>
                     </div>
                     <div style="position: absolute; top: 110px; left: 5px; font-size: 0.7rem; color: var(--text-muted);">
-                        {{ 'Util/Gen' if site_id == 'nairobi' else 'Gen' }}
+                        {{ 'KPLC Grid' if site_id == 'nairobi' else 'Generator' }}
                     </div>
                     <div class="node n-inv">
                         <div class="node-icon">⚡</div>
@@ -2245,7 +1982,6 @@ def home():
                 </div>
             </div>
 
-            <!-- KEY METRICS -->
             <div class="col-4 card">
                 <div class="card-title">Solar Generation</div>
                 <div class="metric-val" style="color:var(--warn)">{{ '%0.f'|format(solar) }}<span style="font-size:1.2rem">W</span></div>
@@ -2262,7 +1998,6 @@ def home():
                 <div class="metric-unit">{{ breakdown['total_kwh'] }} kWh Usable</div>
             </div>
 
-            <!-- 30-DAY HEATMAP -->
             <div class="col-12 card">
                 <div class="card-title">30-Day Solar Efficiency Calendar</div>
                 <div class="heatmap-container">
@@ -2292,7 +2027,6 @@ def home():
                 </div>
             </div>
 
-            <!-- SCENARIO PLANNER -->
             <div class="col-12 card">
                 <div class="card-title">Appliance Simulator</div>
                 <div class="sched-grid">
@@ -2319,7 +2053,6 @@ def home():
                 </div>
             </div>
 
-            <!-- RECOMMENDATIONS -->
             <div class="col-6 card">
                 <div class="card-title">📝 System Recommendations</div>
                 {% for rec in recommendation_items %}
@@ -2333,7 +2066,6 @@ def home():
                 {% endfor %}
             </div>
 
-            <!-- SCHEDULE -->
             <div class="col-6 card">
                 <div class="card-title">📅 Today's Schedule</div>
                 {% for item in schedule_items %}
@@ -2347,13 +2079,11 @@ def home():
                 {% endfor %}
             </div>
 
-            <!-- BATTERY PROJECTION -->
             <div class="col-8 card">
                 <div class="card-title">24-Hour Battery Projection (Tier-Aware)</div>
                 <div style="height:280px"><canvas id="simChart"></canvas></div>
             </div>
 
-            <!-- STORAGE BREAKDOWN -->
             <div class="col-4 card">
                 <div class="card-title">Storage Breakdown</div>
                 <div style="height:200px"><canvas id="pieChart"></canvas></div>
@@ -2370,7 +2100,6 @@ def home():
                 </div>
             </div>
 
-            <!-- 24-HOUR LOAD VS DISCHARGE -->
             <div class="col-12 card">
                 <div class="card-title">Last 24 Hours: Load vs Battery Discharge vs Solar</div>
                 <div style="height:300px"><canvas id="hourlyChart"></canvas></div>
@@ -2379,7 +2108,6 @@ def home():
                 </div>
             </div>
 
-            <!-- ACTIVITY & ALERTS -->
             <div class="col-12 card">
                 <div class="card-title">{{ 'Office Activity Detection' if site_config['appliance_type'] == 'office' else 'House Activity Detection' }}</div>
                 <div style="margin-bottom:20px">
@@ -2418,7 +2146,6 @@ def home():
     </div>
 
     <script>
-        // Data from Backend
         const labels = {{ sim['labels']|tojson }};
         const baseData = {{ sim['data']|tojson }};
         const tierData = {{ sim['tiers']|tojson }};
@@ -2426,27 +2153,23 @@ def home():
         const lForecast = {{ l_fc|tojson }};
         const pieData = {{ breakdown['chart_data']|tojson }};
         const tierLabels = {{ tier_labels|tojson }};
-        const pieColors = {{ breakdown['tier_colors']|tojson }}; // Dynamic Colors
+        const pieColors = {{ breakdown['tier_colors']|tojson }}; 
         const hourly24h = {{ hourly_24h|tojson }};
         
-        // Sim State
         let activeSims = {};
         let simTierData = [];
         
-        // Chart.js Global Config
         Chart.defaults.color = '#94a3b8';
         Chart.defaults.borderColor = 'rgba(99, 102, 241, 0.2)';
         Chart.defaults.font.family = "'Manrope', sans-serif";
         
-        // --- 1. Tier-Aware Battery Projection Chart ---
         const ctx = document.getElementById('simChart');
         
-        // Create color array based on tier
         const borderColors = tierData.map(tier => {
-            if (tier === 'primary') return '#10b981';  // Green
-            if (tier === 'backup') return '#3b82f6';   // Blue
-            if (tier === 'reserve') return '#f59e0b';  // Orange
-            return '#64748b';  // Grey for empty
+            if (tier === 'primary') return '#10b981'; 
+            if (tier === 'backup') return '#3b82f6';
+            if (tier === 'reserve') return '#f59e0b';
+            return '#64748b';
         });
         
         const backgroundColors = tierData.map(tier => {
@@ -2503,7 +2226,7 @@ def home():
                             usePointStyle: true,
                             padding: 15,
                             font: { size: 12, weight: '600' },
-                            filter: (item, chart) => item.text !== 'Battery Level' // Hide default legend
+                            filter: (item, chart) => item.text !== 'Battery Level' 
                         }
                     },
                     tooltip: {
@@ -2519,19 +2242,17 @@ def home():
                                 let tier;
                                 let scenarioLabel = "";
 
-                                // Determine if this is the "Normal" line or "Simulated" line
                                 if (context.datasetIndex === 1 && simTierData.length > 0) {
                                     tier = simTierData[context.dataIndex];
-                                    scenarioLabel = "With Load"; // Label for the orange line
+                                    scenarioLabel = "With Load";
                                 } else {
                                     tier = tierData[context.dataIndex];
-                                    scenarioLabel = "Normal";    // Label for the green line
+                                    scenarioLabel = "Normal";
                                 }
 
                                 tier = tier || 'unknown';
                                 const tierName = tier.charAt(0).toUpperCase() + tier.slice(1);
                                 
-                                // Return clear format: "Scenario: Value% (Tier)"
                                 return `${scenarioLabel}: ${context.parsed.y.toFixed(1)}% (${tierName})`;
                             }
                         }
@@ -2559,14 +2280,13 @@ def home():
             }
         });
 
-        // --- 2. Storage Pie Chart (Dynamic Colors) ---
         new Chart(document.getElementById('pieChart'), {
             type: 'doughnut',
             data: {
                 labels: tierLabels,
                 datasets: [{
                     data: pieData,
-                    backgroundColor: pieColors, // Use colors from backend
+                    backgroundColor: pieColors,
                     borderWidth: 0,
                     borderRadius: 4,
                     spacing: 2
@@ -2602,7 +2322,6 @@ def home():
             }
         });
 
-        // --- 3. 24-Hour Load vs Discharge Chart with Zoom ---
         const hourlyLabels = hourly24h.map(d => {
             const dt = new Date(d.timestamp);
             return dt.toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit'});
@@ -2730,12 +2449,10 @@ def home():
             }
         });
 
-        // Double-click to reset zoom
         hourlyCtx.ondblclick = function() {
             hourlyChart.resetZoom();
         };
 
-        // --- 4. Interaction Logic ---
         function toggleSim(id, watts) {
             const btn = document.getElementById('btn-' + id);
             
@@ -2759,12 +2476,10 @@ def home():
                 return;
             }
 
-            // Load site config capacities from backend (rendered into JS vars)
             const P_TOTAL = {{ site_config["primary_battery_wh"] }};
             const B_TOTAL = {{ site_config["backup_battery_wh"] }} * {{ site_config["backup_degradation"] }};
             const TOTAL_CAPACITY = (P_TOTAL * 0.60) + (B_TOTAL * 0.80) + (P_TOTAL * 0.20); 
             
-            // Reconstruct initial state from simple variables
             let curr_p_wh = ({{ p_pct }} / 100.0) * P_TOTAL;
             
             let curr_b_wh = 0;
@@ -2772,24 +2487,19 @@ def home():
                 curr_b_wh = ({{ backup_pct }} / 100.0) * B_TOTAL;
             }
             
-            // First point is simply the current percentage (Index 0)
             let simCurve = [ baseData[0] ];
-            let newSimTiers = [ tierData[0] ]; // Start with current tier
+            let newSimTiers = [ tierData[0] ];
             
             for (let i = 0; i < 24; i++) {
-                // Get forecasted values
                 const solar_gen = sForecast[i]?.estimated_generation || 0;
                 const base_load = lForecast[i]?.estimated_load || {{ load }};
                 
-                // Calculate net energy flow including simulated load
                 const total_load = base_load + totalSimWatts;
                 const net_flow = solar_gen - total_load;
                 
-                // CORRECTED: Handle both charging and discharging
-                if (net_flow > 0) {  // Surplus - charge batteries
+                if (net_flow > 0) { 
                     let charge_amount = net_flow;
                     
-                    // Charge primary first (up to 100%)
                     const primary_space = P_TOTAL - curr_p_wh;
                     if (primary_space > 0) {
                         const charge_to_primary = Math.min(charge_amount, primary_space);
@@ -2797,7 +2507,6 @@ def home():
                         charge_amount -= charge_to_primary;
                     }
                     
-                    // Then charge backup if there's still surplus
                     if (charge_amount > 0 && B_TOTAL > 0) {
                         const backup_space = B_TOTAL - curr_b_wh;
                         if (backup_space > 0) {
@@ -2806,10 +2515,9 @@ def home():
                         }
                     }
                 }
-                else {  // Deficit - discharge batteries (existing logic)
+                else { 
                     let drain = Math.abs(net_flow);
                     
-                    // Tier 1: Primary down to 40%
                     let primary_min = P_TOTAL * 0.40;
                     let available_tier1 = Math.max(0, curr_p_wh - primary_min);
                     
@@ -2821,7 +2529,6 @@ def home():
                         drain -= available_tier1;
                     }
                     
-                    // Tier 2: Backup if drain remains
                     if (drain > 0 && B_TOTAL > 0) {
                         let backup_min = B_TOTAL * 0.20;
                         let available_backup = Math.max(0, curr_b_wh - backup_min);
@@ -2835,7 +2542,6 @@ def home():
                         }
                     }
                     
-                    // Tier 3: Emergency primary (40% -> 20%)
                     if (drain > 0) {
                         let emergency_min = P_TOTAL * 0.20;
                         let available_emergency = Math.max(0, curr_p_wh - emergency_min);
@@ -2848,7 +2554,6 @@ def home():
                     }
                 }
                 
-                // Calculate display values
                 let primary_tier1_avail = Math.max(0, curr_p_wh - (P_TOTAL * 0.40));
                 let backup_avail = 0;
                 if (B_TOTAL > 0) {
@@ -2859,7 +2564,6 @@ def home():
                 let total_available = primary_tier1_avail + backup_avail + emergency_avail;
                 let percentage = (total_available / TOTAL_CAPACITY) * 100;
 
-                // Determine Active Tier
                 let active_tier = 'empty';
                 if (primary_tier1_avail > 0) active_tier = 'primary';
                 else if (backup_avail > 0) active_tier = 'backup';
@@ -2875,12 +2579,11 @@ def home():
             chart.update();
         }
         
-        // Health check and auto-refresh
         fetch('/health').then(r => r.json()).then(d => { 
             if(!d.polling_thread_alive) fetch('/start-polling'); 
         });
         
-        setTimeout(() => location.reload(), 120000); // Refresh every 2 minutes
+        setTimeout(() => location.reload(), 120000); 
     </script>
 </body>
 </html>
@@ -2894,11 +2597,11 @@ def home():
         tier_labels=tier_labels, primary_pct=primary_pct, 
         backup_voltage=backup_voltage, backup_pct=backup_pct,
         recommendation_items=recommendation_items, schedule_items=schedule_items,
-        heavy_loads_safe=heavy_loads_safe, site_config=site_config, site_id=site_id
+        heavy_loads_safe=heavy_loads_safe, site_config=site_config, site_id=site_id,
+        grid_watts=grid_watts, is_importing=is_importing
     )
 
 if __name__ == '__main__':
-    # Create required directories and files
     for file in [DATA_FILE, HISTORY_FILE, ML_MODEL_FILE]:
         if not Path(file).exists():
             Path(file).touch()
