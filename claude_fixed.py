@@ -539,7 +539,7 @@ class DailyHistoryManager:
             })
         return result
 
-def identify_active_appliances(current, previous, gen_active, backup_volts, primary_pct, ml_detector_instance):
+def identify_active_appliances(current, previous, gen_active, backup_volts, primary_pct, ml_detector_instance, site_id='kajiado'):
     """
     Enhanced detection using ML appliance classifier
     """
@@ -547,8 +547,11 @@ def identify_active_appliances(current, previous, gen_active, backup_volts, prim
     
     # CRITICAL: Manual generator detection
     if gen_active:
-        if primary_pct > 42: 
-            detected.append("Generator Load")
+        if primary_pct > 42:
+            if site_id == 'nairobi':
+                detected.append("Utility Load")
+            else:
+                detected.append("Generator Load")
         else: 
             detected.append("System Charging")
         return detected  # Return early if generator is on
@@ -1269,7 +1272,7 @@ def poll_growatt():
                     managers['daily_accumulator']['solar_wh'] += tot_sol * interval_hours
 
                     # ML ENHANCED: Appliance Detection
-                    detected = identify_active_appliances(tot_out, managers['prev_watts'], gen_on, b_volts, p_min, managers['ml_detector'])
+                    detected = identify_active_appliances(tot_out, managers['prev_watts'], gen_on, b_volts, p_min, managers['ml_detector'], site_id)
                     is_manual_gen = any("Generator" in x for x in detected)
                     
                     if not is_manual_gen: 
@@ -2378,7 +2381,7 @@ def home():
 
             <!-- ACTIVITY & ALERTS -->
             <div class="col-12 card">
-                <div class="card-title">House Activity Detection</div>
+                <div class="card-title">{{ 'Office Activity Detection' if site_config['appliance_type'] == 'office' else 'House Activity Detection' }}</div>
                 <div style="margin-bottom:20px">
                     {% if detected %}
                         {% for a in detected %}
