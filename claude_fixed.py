@@ -1611,7 +1611,11 @@ def home():
     hourly_24h = d.get("hourly_24h") or []
 
     st_txt, st_col = "NORMAL", "var(--info)"
-    if gen_on: st_txt, st_col = "GENERATOR ON", "var(--crit)"
+    if gen_on: 
+        if site_id == 'nairobi':
+            st_txt, st_col = "UTILITY ON", "var(--crit)"
+        else:
+            st_txt, st_col = "GENERATOR ON", "var(--crit)"
     elif p_pct < 40: st_txt, st_col = "BACKUP ACTIVE", "var(--warn)"
     elif solar > load + 500: st_txt, st_col = "CHARGING", "var(--success)"
 
