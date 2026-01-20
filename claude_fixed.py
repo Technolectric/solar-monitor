@@ -409,12 +409,10 @@ class DailyHistoryManager:
 def identify_active_appliances(current, previous, gen_active, backup_volts, primary_pct, ml_detector_instance, site_id='kajiado'):
     detected = []
     
-    if gen_active:
+    # Only block for Generator if not Nairobi (Nairobi has Utility which is normal)
+    if gen_active and site_id != 'nairobi':
         if primary_pct > 42:
-            if site_id == 'nairobi':
-                detected.append("Utility Load")
-            else:
-                detected.append("Generator Load")
+            detected.append("Generator Load")
         else: 
             detected.append("System Charging")
         return detected
@@ -2606,4 +2604,4 @@ if __name__ == '__main__':
         if not Path(file).exists():
             Path(file).touch()
     
-    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000))
