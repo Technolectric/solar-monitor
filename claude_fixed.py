@@ -2200,7 +2200,7 @@ def home():
     <div class="container">
         <div class="header">
             <div>
-                <h1>🏠 {{ site_config['label']|upper }}</h1>
+                <h1>{{ '🏢' if site_config['appliance_type'] == 'office' else '🏠' }} {{ site_config['label']|upper }}</h1>
                 <span class="status-badge" style="border-color: {{ st_col }}; color: {{ st_col }}">{{ st_txt }}</span>
             </div>
             <div style="display:flex; align-items:center; gap:20px;">
@@ -2235,7 +2235,7 @@ def home():
                         <div class="node-val">INV</div>
                     </div>
                     <div class="node n-home {{ 'pulse-g' if load > 2000 else '' }}">
-                        <div class="node-icon">🏠</div>
+                        <div class="node-icon">{{ '🏢' if site_config['appliance_type'] == 'office' else '🏠' }}</div>
                         <div class="node-val">{{ '%0.f'|format(load) }}W</div>
                     </div>
                     <div class="node n-bat {{ 'pulse-g' if is_charging else ('pulse-r' if is_discharging else '') }}">
@@ -2252,7 +2252,7 @@ def home():
                 <div class="metric-unit">Current Input</div>
             </div>
             <div class="col-4 card">
-                <div class="card-title">Home Consumption</div>
+                <div class="card-title">{{ 'Office Consumption' if site_config['appliance_type'] == 'office' else 'Home Consumption' }}</div>
                 <div class="metric-val" style="color:var(--info)">{{ '%0.f'|format(load) }}<span style="font-size:1.2rem">W</span></div>
                 <div class="metric-unit">Active Load</div>
             </div>
@@ -2386,10 +2386,10 @@ def home():
                     {% if detected %}
                         {% for a in detected %}
                             {% if 'House 1' in a %}
-                                <span class="tag house1">🏠 {{ a }}</span>
+                                <span class="tag house1">{{ '🏢' if site_config['appliance_type'] == 'office' else '🏠' }} {{ a }}</span>
                             {% elif 'House 2' in a %}
-                                <span class="tag house2">🏠 {{ a }}</span>
-                            {% elif 'Water' in a or 'Generator' in a %}
+                                <span class="tag house2">{{ '🏢' if site_config['appliance_type'] == 'office' else '🏠' }} {{ a }}</span>
+                            {% elif 'Water' in a or 'Generator' in a or 'Utility' in a %}
                                 <span class="tag" style="background: rgba(239, 68, 68, 0.15); border-color: var(--crit);">⚠️ {{ a }}</span>
                             {% else %}
                                 <span class="tag">{{ a }}</span>
