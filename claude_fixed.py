@@ -629,7 +629,7 @@ def get_energy_status(p_pct, b_volts, site_config):
     }
 
 def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now_hour=None, 
-                           heavy_loads_safe=False, gen_on=False, b_active=False):
+                           heavy_loads_safe=False, gen_on=False, b_active=False, site_id='kajiado'):
     """Smart appliance scheduler - properly coordinated with recommendations."""
     battery_kwh_available = status['total_available_wh'] / 1000
     battery_soc_pct = status['total_pct']
@@ -651,12 +651,20 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
         
         # ABSOLUTE BLOCKERS (same as recommendations)
         if gen_on:
-            decision.update({
-                "msg": "Generator On", 
-                "status": "unsafe",
-                "color": "var(--crit)",
-                "reason": "Generator running - no loads"
-            })
+            if site_id == 'nairobi':
+                decision.update({
+                    "msg": "Utility Power", 
+                    "status": "unsafe",
+                    "color": "var(--crit)",
+                    "reason": "Utility/Gen running - monitor usage"
+                })
+            else:
+                decision.update({
+                    "msg": "Generator On", 
+                    "status": "unsafe",
+                    "color": "var(--crit)",
+                    "reason": "Generator running - no loads"
+                })
         elif b_active:
             decision.update({
                 "msg": "Backup Active", 
@@ -1047,7 +1055,7 @@ def send_email(subject, html, alert_type="general", send_via_email=True):
     alert_history.insert(0, {"timestamp": now, "type": alert_type, "subject": subject})
     alert_history = alert_history[:20]
 
-def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run):
+def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run, site_id='kajiado'):
     """
     Comprehensive alert checking from Render version.
     Checks inverter health, battery status, and discharge levels.
@@ -1081,7 +1089,10 @@ def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run):
     
     # Critical: Generator or backup voltage low
     if gen_run or (b_volt < 51.2 and b_volt > 10): # >10 to filter out 0V readings
-        send_email("🚨 CRITICAL: Generator Running", "Backup critical", "critical")
+        if site_id == 'nairobi':
+            send_email("🚨 CRITICAL: Utility Power Running", "Monitor usage", "critical")
+        else:
+            send_email("🚨 CRITICAL: Generator Running", "Backup critical", "critical")
         return
     
     # High alert: Backup active with low primary
@@ -1259,7 +1270,7 @@ def poll_growatt():
                     managers['history_manager'].add_hourly_datapoint(now, tot_out, tot_bat, tot_sol, tot_grid)
 
                     # ALERTS
-                    check_alerts(inv_data, None, tot_sol, tot_bat, gen_on)
+                    check_alerts(inv_data, None, tot_sol, tot_bat, gen_on, site_id)
 
                     # Pool pump monitoring (Only relevant if site has one, simplified logic)
                     if now.hour >= 16 and site_id == "kajiado":
@@ -1343,7 +1354,8 @@ def poll_growatt():
                         now_hour=now.hour,
                         heavy_loads_safe=heavy_loads_safe,
                         gen_on=gen_on,
-                        b_active=b_act
+                        b_active=b_act,
+                        site_id=site_id
                     )
                     del breakdown['status_obj']
 
@@ -1689,7 +1701,10 @@ def home():
     schedule_blocks_heavy = any('No Safe Solar' in item.get('title', '') for item in schedule_items)
     
     if gen_on:
-        recommendation_items.append({'icon': '🚨', 'title': 'NO HEAVY LOADS', 'description': 'Generator running - turn off all non-essential appliances', 'class': 'critical'})
+        if site_id == 'nairobi':
+            recommendation_items.append({'icon': '🚨', 'title': 'UTILITY POWER ACTIVE', 'description': 'Utility/Gen running - monitor usage', 'class': 'critical'})
+        else:
+            recommendation_items.append({'icon': '🚨', 'title': 'NO HEAVY LOADS', 'description': 'Generator running - turn off all non-essential appliances', 'class': 'critical'})
     elif b_active:
         recommendation_items.append({'icon': '⚠️', 'title': 'MINIMIZE LOADS', 'description': 'Backup battery active - essential loads only', 'class': 'warning'})
     elif is_night:
@@ -2192,6 +2207,9 @@ def home():
                     <div class="node n-gen {{ 'pulse-r' if gen_on else '' }}">
                         <div class="node-icon">⚙️</div>
                         <div class="node-val">{{ 'ON' if gen_on else 'OFF' }}</div>
+                    </div>
+                    <div style="position: absolute; top: 110px; left: 5px; font-size: 0.7rem; color: var(--text-muted);">
+                        {{ 'Util/Gen' if site_id == 'nairobi' else 'Gen' }}
                     </div>
                     <div class="node n-inv">
                         <div class="node-icon">⚡</div>
