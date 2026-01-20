@@ -487,12 +487,13 @@ class DailyHistoryManager:
                 json.dump(self.history, f)
         except: pass
 
-    def add_hourly_datapoint(self, timestamp, load_w, battery_discharge_w, solar_w):
+    def add_hourly_datapoint(self, timestamp, load_w, battery_discharge_w, solar_w, grid_gen_w=0):
         self.hourly_data.append({
             'timestamp': timestamp.isoformat(),
             'load': load_w,
             'battery_discharge': battery_discharge_w,
-            'solar': solar_w
+            'solar': solar_w,
+            'grid_gen': grid_gen_w
         })
         if len(self.hourly_data) > 288:
             self.hourly_data = self.hourly_data[-288:]
@@ -1143,7 +1144,7 @@ def poll_growatt():
                     wx_data = get_weather_forecast(config["latitude"], config["longitude"])
                     
                     now = datetime.now(EAT)
-                    tot_out, tot_sol, tot_bat = 0, 0, 0
+                    tot_out, tot_sol, tot_bat, tot_grid = 0, 0, 0, 0
                     inv_data, p_caps = [], []
                     b_data, gen_on = None, False
 
@@ -1173,6 +1174,7 @@ def poll_growatt():
                                         vb = float(d.get("vBat") or 0)
                                         pb = float(d.get("pBat") or 0)
                                         sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
+                                        grid_pwr = float(d.get("pAcInPut") or 0)
                                         temp = max(
                                             float(d.get("invTemperature") or 0),
                                             float(d.get("dcDcTemperature") or 0),
@@ -1182,6 +1184,7 @@ def poll_growatt():
 
                                         tot_out += op
                                         tot_sol += sol
+                                        tot_grid += grid_pwr
                                         if pb > 0: tot_bat += pb
 
                                         info = {
@@ -1249,7 +1252,7 @@ def poll_growatt():
                     if not is_manual_gen: 
                         managers['load_manager'].update(tot_out)
                     
-                    managers['history_manager'].add_hourly_datapoint(now, tot_out, tot_bat, tot_sol)
+                    managers['history_manager'].add_hourly_datapoint(now, tot_out, tot_bat, tot_sol, tot_grid)
 
                     # ALERTS
                     check_alerts(inv_data, None, tot_sol, tot_bat, gen_on)
@@ -2254,17 +2257,11 @@ def home():
                 <div class="sched-grid">
                     {% if site_config['appliance_type'] == 'office' %}
                         {% set sim_items = [
-                            ('Desktop Computer', 200, '🖥️'), ('Laptops (x5)', 250, '💻'), ('Laser Printer', 800, '🖨️'),
-                            ('Air Conditioner', 1800, '❄️'), ('Photocopier', 1200, '📠'), ('Coffee Maker', 1400, '☕'),
-                            ('Microwave', 1000, '🍿'), ('LED Lights', 150, '💡'), ('Monitors (x10)', 300, '🖥️'),
-                            ('Server', 400, '🔌')
+                            ('Desktop Computer', 200, '🖥️'), ('Air Conditioner', 1800, '❄️'), ('Laser Printer', 800, '🖨️')
                         ] %}
                     {% else %}
                         {% set sim_items = [
-                            ('Pool Pump', 1200, '🏊'), ('Washing Machine', 800, '🧺'), ('Electric Oven', 2500, '🍳'),
-                            ('Air Conditioner', 1500, '❄️'), ('Microwave', 1000, '🍿'), ('Kettle', 2000, '☕'),
-                            ('Dishwasher', 1200, '🍽️'), ('Water Heater', 3000, '🚿'), ('Hair Dryer', 1500, '💇'),
-                            ('Iron', 1200, '👔')
+                            ('Washing Machine', 800, '🧺'), ('Electric Oven', 2500, '🍳'), ('Water Heater', 3000, '🚿')
                         ] %}
                     {% endif %}
                     
@@ -2572,6 +2569,7 @@ def home():
         const loadData = hourly24h.map(d => d.load);
         const dischargeData = hourly24h.map(d => d.battery_discharge);
         const solarData = hourly24h.map(d => d.solar);
+        const gridGenData = hourly24h.map(d => d.grid_gen || 0);
 
         const hourlyCtx = document.getElementById('hourlyChart');
         const hourlyChart = new Chart(hourlyCtx, {
@@ -2606,6 +2604,17 @@ def home():
                         data: solarData,
                         borderColor: '#10b981',
                         backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.3,
+                        fill: true,
+                        pointRadius: 1,
+                        pointHoverRadius: 5
+                    },
+                    {
+                        label: 'Grid/Gen (W)',
+                        data: gridGenData,
+                        borderColor: '#8b5cf6',
+                        backgroundColor: 'rgba(139, 92, 246, 0.1)',
                         borderWidth: 2,
                         tension: 0.3,
                         fill: true,
