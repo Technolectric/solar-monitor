@@ -50,6 +50,7 @@ SITES = {
         "api_token": os.getenv("GROWATT_API_KEY_KAJIADO"),
         "serial_numbers": ["RKG3B0400T", "KAM4N5W0AG", "JNK1CDR0KQ"],
         "label": "Kajiado Home Solar",
+        "recipient_email": os.getenv("RECIPIENT_EMAIL_KAJIADO", os.getenv("RECIPIENT_EMAIL")),
         "inverter_config": {
             "RKG3B0400T": {"label": "Inverter 1", "type": "primary"},
             "KAM4N5W0AG": {"label": "Inverter 2", "type": "primary"},
@@ -68,6 +69,7 @@ SITES = {
         "api_token": os.getenv("GROWATT_API_KEY_NAIROBI"),
         "serial_numbers": [os.getenv("SERIAL_NUMBERS_NAIROBI")] if os.getenv("SERIAL_NUMBERS_NAIROBI") else [],
         "label": "Nairobi Office Solar",
+        "recipient_email": os.getenv("RECIPIENT_EMAIL_NAIROBI", os.getenv("RECIPIENT_EMAIL")),
         "inverter_config": {},
         "primary_battery_wh": 6000,
         "backup_battery_wh": 0,
@@ -731,7 +733,8 @@ def calculate_battery_cascade(solar, load, p_pct, b_volts, site_config):
 # 4. Helpers
 # ----------------------------
 headers_template = {"Content-Type": "application/x-www-form-urlencoded"}
-last_alert_time, alert_history = {}, []
+last_alert_time = {}  # Will store {site_id: {alert_type: timestamp}}
+alert_history = {}    # Will store {site_id: [alert_list]}
 site_latest_data = {}
 
 def get_weather_forecast(lat, lon):
@@ -801,30 +804,45 @@ def calculate_daily_irradiance_potential(weather_data, target_date, site_config)
         total_potential_wh += hourly_potential
     return total_potential_wh
 
-def send_email(subject, html, alert_type="general", send_via_email=True):
+def send_email(subject, html, alert_type="general", send_via_email=True, site_id="kajiado"):
     global last_alert_time, alert_history
+    
+    # Initialize site-specific structures if needed
+    if site_id not in last_alert_time:
+        last_alert_time[site_id] = {}
+    if site_id not in alert_history:
+        alert_history[site_id] = []
+    
     cooldown_minutes = 120
     if "critical" in alert_type.lower(): cooldown_minutes = 60
     elif "high_load" in alert_type.lower(): cooldown_minutes = 30
     
-    if alert_type in last_alert_time:
-        time_since = datetime.now(EAT) - last_alert_time[alert_type]
+    # Check cooldown for this site and alert type
+    if alert_type in last_alert_time[site_id]:
+        time_since = datetime.now(EAT) - last_alert_time[site_id][alert_type]
         if time_since < timedelta(minutes=cooldown_minutes):
             return
     
-    if send_via_email and RESEND_API_KEY:
+    # Get site-specific recipient email
+    recipient = SITES.get(site_id, {}).get("recipient_email", RECIPIENT_EMAIL)
+    
+    if send_via_email and RESEND_API_KEY and recipient:
         try:
+            # Add site label to subject
+            site_label = SITES.get(site_id, {}).get("label", site_id)
+            full_subject = f"[{site_label}] {subject}"
+            
             requests.post(
                 "https://api.resend.com/emails", 
                 headers={"Authorization": f"Bearer {RESEND_API_KEY}"}, 
-                json={"from": SENDER_EMAIL, "to": [RECIPIENT_EMAIL], "subject": subject, "html": html}
+                json={"from": SENDER_EMAIL, "to": [recipient], "subject": full_subject, "html": html}
             )
         except: pass
     
     now = datetime.now(EAT)
-    last_alert_time[alert_type] = now
-    alert_history.insert(0, {"timestamp": now, "type": alert_type, "subject": subject})
-    alert_history = alert_history[:20]
+    last_alert_time[site_id][alert_type] = now
+    alert_history[site_id].insert(0, {"timestamp": now, "type": alert_type, "subject": subject, "site_id": site_id})
+    alert_history[site_id] = alert_history[site_id][:20]
 
 def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run, site_id='kajiado'):
     inv1 = next((i for i in inv_data if i['SN'] == 'RKG3B0400T'), None)
@@ -843,34 +861,34 @@ def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run, site_id='
     
     for inv in inv_data:
         if inv.get('communication_lost'): 
-            send_email(f"⚠️ Comm Lost: {inv['Label']}", "Check inverter", "communication_lost")
+            send_email(f"⚠️ Comm Lost: {inv['Label']}", "Check inverter", "communication_lost", site_id=site_id)
         if inv.get('has_fault'): 
-            send_email(f"🚨 FAULT: {inv['Label']}", "Fault code", "fault_alarm")
+            send_email(f"🚨 FAULT: {inv['Label']}", "Fault code", "fault_alarm", site_id=site_id)
         if inv.get('high_temperature'): 
-            send_email(f"🌡️ High Temp: {inv['Label']}", f"Temp: {inv['temperature']}", "high_temperature")
+            send_email(f"🌡️ High Temp: {inv['Label']}", f"Temp: {inv['temperature']}", "high_temperature", site_id=site_id)
     
     if site_id == 'nairobi':
         if not gen_run:
-            send_email("🚨 CRITICAL: Grid Failure", "No utility power - running on battery", "critical")
+            send_email("🚨 CRITICAL: Grid Failure", "No utility power - running on battery", "critical", site_id=site_id)
             return
     else:
         if gen_run or (b_volt < 51.2 and b_volt > 10):
-            send_email("🚨 CRITICAL: Generator Running", "Backup critical", "critical")
+            send_email("🚨 CRITICAL: Generator Running", "Backup critical", "critical", site_id=site_id)
             return
     
     if b_active and p_cap < 40:
-        send_email("⚠️ HIGH ALERT: Backup Active", "Reduce Load", "backup_active")
+        send_email("⚠️ HIGH ALERT: Backup Active", "Reduce Load", "backup_active", site_id=site_id)
         return
     
     if 40 < p_cap < 50:
-        send_email("⚠️ Primary Low", "Reduce Load", "warning", send_via_email=b_active)
+        send_email("⚠️ Primary Low", "Reduce Load", "warning", send_via_email=b_active, site_id=site_id)
     
     if bat_discharge >= 4500: 
-        send_email("🚨 URGENT: High Discharge", "Critical", "very_high_load", send_via_email=b_active)
+        send_email("🚨 URGENT: High Discharge", "Critical", "very_high_load", send_via_email=b_active, site_id=site_id)
     elif 2500 <= bat_discharge < 4500: 
-        send_email("⚠️ High Discharge", "Warning", "high_load", send_via_email=b_active)
+        send_email("⚠️ High Discharge", "Warning", "high_load", send_via_email=b_active, site_id=site_id)
     elif 1500 <= bat_discharge < 2000 and p_cap < 50: 
-        send_email("ℹ️ Moderate Discharge", "Info", "moderate_load", send_via_email=b_active)
+        send_email("ℹ️ Moderate Discharge", "Info", "moderate_load", send_via_email=b_active, site_id=site_id)
 
 # ----------------------------
 # 5. Polling Loop
@@ -1029,7 +1047,7 @@ def poll_growatt():
                             if duration > timedelta(hours=3) and now.hour >= 18:
                                 if managers['pool_pump_last_alert'] is None or (now - managers['pool_pump_last_alert']) > timedelta(hours=1):
                                     duration_hours = int(duration.total_seconds() // 3600)
-                                    send_email("⚠️ HIGH LOAD ALERT", f"Battery discharge > 1.1kW for {duration_hours}h at {site_id}.", "high_load_continuous")
+                                    send_email("⚠️ HIGH LOAD ALERT", f"Battery discharge > 1.1kW for {duration_hours}h.", "high_load_continuous", site_id=site_id)
                                     managers['pool_pump_last_alert'] = now
                         else:
                             managers['pool_pump_start_time'] = None
@@ -1379,7 +1397,7 @@ def home():
     now = datetime.now(EAT)
     is_night = (now.hour < 7 or now.hour >= 18)
 
-    alerts = alert_history[:8]
+    alerts = alert_history.get(site_id, [])[:8]
     tier_labels = breakdown.get('tier_labels', ['Primary', 'Backup', 'Reserve'])
     primary_pct = breakdown.get('primary_pct', 0)
     backup_voltage = breakdown.get('backup_voltage', 0)
@@ -2605,4 +2623,3 @@ if __name__ == '__main__':
             Path(file).touch()
     
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
-
