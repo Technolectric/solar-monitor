@@ -110,7 +110,7 @@ WEATHERAPI_KEY = os.getenv('WEATHERAPI_KEY')
 class KPLCBillingTracker:
     def __init__(self):
         self.billing_file = KPLC_BILLING_FILE
-        self.account_number = "2073344"
+        self.account_number = os.getenv("KPLC_ACCOUNT_NUMBER", "2073344")
         self.billing_data = self.load_billing_data()
         self.data_lock = Lock()
         
