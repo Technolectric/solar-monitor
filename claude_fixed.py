@@ -173,6 +173,7 @@ class KPLCBillingTracker:
             "Content-Type": "application/json",
             "User-Agent": "Mozilla/5.0"
         }
+        # Use accountReference as per screenshot
         params = {"accountReference": self.account_number}
 
         try:
@@ -184,6 +185,7 @@ class KPLCBillingTracker:
                 return self.parse_kplc_response(data)
             else:
                 print(f"KPLC API Failed: {response.status_code}", flush=True)
+                print(f"Reason: {response.text}", flush=True)
         except Exception as e:
             print(f"Error fetching KPLC data: {e}", flush=True)
         return None
@@ -191,12 +193,18 @@ class KPLCBillingTracker:
     def parse_kplc_response(self, data):
         """Parse JSON response based on specific KPLC structure"""
         try:
-            # 1. Navigate JSON structure
+            # 1. Navigate JSON structure (Data -> [0] -> colBills -> [0])
+            # The structure from your screenshot and logs:
+            # { data: [ { colBills: [ { ...bill data... } ] } ] }
+            
             if not data.get('data') or len(data['data']) == 0:
+                print("⚠️ KPLC: No 'data' field in response", flush=True)
                 return None
             
             main_record = data['data'][0]
+            
             if not main_record.get('colBills') or len(main_record['colBills']) == 0:
+                print("⚠️ KPLC: No 'colBills' found for this account", flush=True)
                 return None
             
             latest = main_record['colBills'][0]
@@ -213,30 +221,52 @@ class KPLCBillingTracker:
                 month_str = now.strftime("%Y-%m")
             
             # 3. Calculate Total kWh (Summing 'base' of Consumption concepts)
+            # SC3 tariff has separate High Rate and Low Rate lines
             total_kwh = 0.0
+            found_concepts = False
+            
             for item in latest.get('concepts', []):
                 name = item.get('conceptName', '')
-                # SC3 tariff has HighRateConsumption and LowRateConsumption
-                if 'Consumption' in name and item.get('unit') == 'kWh':
-                    total_kwh += float(item.get('base', 0))
+                unit = item.get('unit', '')
+                
+                # Check for consumption types
+                if 'Consumption' in name and unit == 'kWh':
+                    val = float(item.get('base', 0))
+                    total_kwh += val
+                    found_concepts = True
             
-            return {
+            # Fallback if concept scanning failed but top-level units exist
+            if total_kwh == 0 and not found_concepts:
+                print("⚠️ KPLC: No consumption concepts found, checking meter list...", flush=True)
+                # Could attempt to check meter readings here if needed, but concepts is standard
+            
+            result = {
                 'month': month_str,
                 'kwh': total_kwh,
                 'amount': float(latest.get('amount', 0)),
                 'bill_date': bill_date_str,
             }
+            print(f"✅ Parsed KPLC Bill: {result}", flush=True)
+            return result
+
         except Exception as e:
             print(f"Error parsing KPLC data: {e}", flush=True)
+            print(f"Raw Data Dump: {json.dumps(data, default=str)[:200]}...", flush=True)
         return None
     
     def get_historical_kwh_from_growatt(self, site_config, start_date, end_date):
         """Fetch historical eToUserTotal from Growatt for date range"""
         try:
             token = site_config['api_token']
+            if not site_config.get('serial_numbers'):
+                print("⚠️ No serial numbers configured for Growatt history fetch", flush=True)
+                return None
+                
             serial_num = site_config['serial_numbers'][0]
             hist_url = "https://openapi.growatt.com/v1/device/storage/storage_history_data"
             headers = {"token": token}
+            
+            print(f"📊 Fetching Growatt History: {start_date.date()} to {end_date.date()}", flush=True)
             
             start_resp = requests.get(
                 hist_url,
@@ -259,13 +289,26 @@ class KPLCBillingTracker:
                 start_total = 0
                 end_total = 0
                 
+                # Extract start value
                 if start_data.get('success') and start_data.get('data', {}).get('datas'):
-                    start_total = float(start_data['data']['datas'][0].get('eToUserTotal', 0))
+                    datas = start_data['data']['datas']
+                    if datas:
+                        start_total = float(datas[0].get('eToUserTotal', 0))
                 
+                # Extract end value
                 if end_data.get('success') and end_data.get('data', {}).get('datas'):
-                    end_total = float(end_data['data']['datas'][0].get('eToUserTotal', 0))
+                    datas = end_data['data']['datas']
+                    if datas:
+                        end_total = float(datas[0].get('eToUserTotal', 0))
                 
+                # If end_total is 0, it means no data for that day (device offline?)
+                if end_total == 0:
+                    print(f"⚠️ Growatt returned 0 for end date {end_date.date()}", flush=True)
+                    return None
+
                 period_kwh = end_total - start_total
+                
+                if period_kwh < 0: period_kwh = 0 # Handle resets
                 
                 return {
                     'start_date': start_date.strftime("%Y-%m-%d"),
@@ -284,13 +327,19 @@ class KPLCBillingTracker:
         kplc_bill = self.scrape_kplc_bill()
         
         if kplc_bill and kplc_bill['month']:
+            # Check if we already have this bill
             existing = [b for b in self.billing_data['historical_bills'] 
                        if b.get('month') == kplc_bill['month']]
             
+            # Note: We might want to update it even if it exists if the amount changed,
+            # but for now, we only add if missing to prevent duplicates
             if not existing:
                 bill_month = datetime.strptime(kplc_bill['month'], "%Y-%m")
+                # Start of billing month
                 period_start = bill_month.replace(day=1)
-                period_end = (period_start + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+                # End of billing month (approx)
+                next_month = bill_month.replace(day=28) + timedelta(days=4)
+                period_end = next_month - timedelta(days=next_month.day)
                 
                 growatt_data = self.get_historical_kwh_from_growatt(
                     site_config, period_start, period_end
@@ -312,6 +361,8 @@ class KPLCBillingTracker:
                     self.billing_data['historical_bills'].append(bill_record)
                     self.save_billing_data()
                     print(f"✅ Added bill record for {kplc_bill['month']}", flush=True)
+                else:
+                    print(f"⚠️ Could not fetch Growatt data for {kplc_bill['month']} to compare", flush=True)
         
         self.update_forecast(site_config)
     
@@ -360,8 +411,9 @@ class KPLCBillingTracker:
         
         if self.billing_data.get('historical_bills'):
             bills = self.billing_data['historical_bills']
-            summary['average_monthly_kwh'] = sum(b.get('kplc_kwh', 0) for b in bills) / len(bills)
-            summary['average_monthly_cost'] = sum(b.get('kplc_amount', 0) for b in bills) / len(bills)
+            if len(bills) > 0:
+                summary['average_monthly_kwh'] = sum(b.get('kplc_kwh', 0) for b in bills) / len(bills)
+                summary['average_monthly_cost'] = sum(b.get('kplc_amount', 0) for b in bills) / len(bills)
         
         return summary
 
@@ -1165,6 +1217,9 @@ site_managers = {}
 def poll_growatt():
     global site_latest_data, polling_active, last_communication, site_managers
 
+    # Flag to ensure we check KPLC once immediately on startup
+    kplc_startup_check_done = False 
+
     for site_id, config in SITES.items():
         if site_id not in site_managers:
             site_managers[site_id] = {
@@ -1420,13 +1475,14 @@ def poll_growatt():
                     
                     print(f"Update {site_id}: Load={tot_out}W, Bat={p_min}%", flush=True)
                     
-                    # Update KPLC billing for Nairobi (once daily at 2 AM)
+                    # Update KPLC billing for Nairobi (Daily at 2 AM or Once on Startup)
                     if site_id == "nairobi":
                         current_hour = datetime.now(EAT).hour
-                        if current_hour == 2:
+                        if current_hour == 2 or not kplc_startup_check_done:
                             try:
+                                print(f"🔄 Triggering KPLC check (Startup={not kplc_startup_check_done})", flush=True)
                                 kplc_tracker.update_billing_comparison(config)
-                                print("✅ Updated KPLC billing data", flush=True)
+                                kplc_startup_check_done = True 
                             except Exception as e:
                                 print(f"Error updating KPLC billing: {e}", flush=True)
 
@@ -2990,22 +3046,59 @@ def home():
 
 @app.route('/update-kplc-billing')
 def update_kplc_billing():
-    """Manual endpoint to trigger KPLC billing update"""
+    """Debug endpoint to see exactly what KPLC and Growatt are returning"""
     site_id, site_config = get_current_site()
     
     if site_id != "nairobi":
         return jsonify({"error": "Only available for Nairobi site"}), 403
     
+    debug_log = {}
+    
     try:
-        kplc_tracker.update_billing_comparison(site_config)
-        summary = kplc_tracker.get_billing_summary()
+        # 1. Test KPLC Connection
+        debug_log['step_1_kplc_fetch'] = "Attempting..."
+        kplc_bill = kplc_tracker.scrape_kplc_bill()
+        debug_log['step_1_kplc_result'] = kplc_bill
+        
+        growatt_result = None
+        
+        # 2. Test Growatt Connection (if KPLC worked)
+        if kplc_bill:
+            debug_log['step_2_growatt_fetch'] = "Attempting..."
+            
+            # Parse dates based on the bill
+            bill_month = datetime.strptime(kplc_bill['month'], "%Y-%m")
+            period_start = bill_month.replace(day=1)
+            # End of month calculation
+            next_month = bill_month.replace(day=28) + timedelta(days=4)
+            period_end = next_month - timedelta(days=next_month.day)
+            
+            debug_log['growatt_target_dates'] = f"{period_start} to {period_end}"
+            
+            # Check for Serial Number availability
+            if not site_config.get('serial_numbers'):
+                debug_log['error_config'] = "No Serial Numbers found in Nairobi config. Check SERIAL_NUMBERS_NAIROBI env var."
+            else:
+                growatt_result = kplc_tracker.get_historical_kwh_from_growatt(
+                    site_config, period_start, period_end
+                )
+                debug_log['step_2_growatt_result'] = growatt_result
+
+            # 3. Trigger the standard save if both exist
+            if growatt_result:
+                kplc_tracker.update_billing_comparison(site_config)
+                debug_log['step_3_save'] = "Triggered standard save function."
+            else:
+                debug_log['step_3_save'] = "Skipped save (missing data)."
+
         return jsonify({
             "success": True,
-            "message": "Billing data updated",
-            "summary": summary
+            "debug_info": debug_log,
+            "current_summary": kplc_tracker.get_billing_summary()
         })
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e), "trace": debug_log}), 500
 
 if __name__ == '__main__':
     for file in [DATA_FILE, HISTORY_FILE, ML_MODEL_FILE]:
