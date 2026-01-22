@@ -7,7 +7,7 @@ import pandas as pd
 from datetime import datetime, timedelta, timezone
 from threading import Thread, Lock
 from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
-from collections import deque, defaultdict
+from collections import deque
 from pathlib import Path
 from sklearn.cluster import KMeans
 from sklearn.ensemble import RandomForestClassifier
@@ -16,7 +16,7 @@ import joblib
 import warnings
 import logging
 
-# Configure logging
+# Configure logging to see errors in Railway console
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,6 @@ app.secret_key = os.getenv("FLASK_SECRET_KEY", "solar-multisite-2026")
 
 # API Configuration
 API_URL = "https://openapi.growatt.com/v1/device/storage/storage_last_data"
-API_HISTORY_URL = "https://openapi.growatt.com/v1/device/storage/storage_history_data"
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
 DATA_FILE = "load_patterns.json"
 HISTORY_FILE = "daily_history.json"
@@ -891,98 +890,6 @@ def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run, site_id='
     elif 1500 <= bat_discharge < 2000 and p_cap < 50: 
         send_email("ℹ️ Moderate Discharge", "Info", "moderate_load", send_via_email=b_active, site_id=site_id)
 
-def get_history_point(token, sn, date_str):
-    """Fetches the cumulative eToUserTotal for a specific date (last value of the day)"""
-    headers = headers_template.copy()
-    headers["token"] = token
-    # Growatt historical data usually requires a page parameter
-    payload = {"storage_sn": sn, "date": date_str, "page": 1} 
-    
-    try:
-        r = requests.post(API_HISTORY_URL, data=payload, headers=headers, timeout=10)
-        if r.status_code == 200:
-            json_resp = r.json()
-            if json_resp.get("code") == 0:
-                data_list = json_resp.get("data", {}).get("datas", [])
-                if data_list:
-                    # Look for the LAST valid reading of the day to get the end-of-day total
-                    # Reverse iteration to find the latest point in the day
-                    for reading in reversed(data_list):
-                        val = float(reading.get("eToUserTotal") or 0)
-                        if val > 0:
-                            return val
-    except Exception as e:
-        print(f"Failed to fetch history for {date_str}: {e}", flush=True)
-    return None
-
-def fetch_nairobi_history(token, sn):
-    """Fetch 3 months of historical grid usage based on cumulative totals"""
-    now = datetime.now(EAT)
-    
-    # Calculate key boundaries to get usage for "This Month", "Last Month", "Month Before Last"
-    # Usage Month X = (Cumulative Total at end of Month X) - (Cumulative Total at end of Month X-1)
-    
-    curr_month_start = now.replace(day=1)
-    
-    # Boundaries:
-    # 1. Now (Current reading)
-    # 2. End of Prev Month (which is Start of Current Month - 1 day)
-    # 3. End of 2 Months Ago (Start of Prev Month - 1 day)
-    # 4. End of 3 Months Ago (Start of 2 Months Ago - 1 day)
-    
-    prev_month_end = curr_month_start - timedelta(days=1)
-    prev_month_start = prev_month_end.replace(day=1)
-    
-    prev_2_month_end = prev_month_start - timedelta(days=1)
-    prev_2_month_start = prev_2_month_end.replace(day=1)
-    
-    prev_3_month_end = prev_2_month_start - timedelta(days=1)
-
-    dates_to_fetch = {
-        "now": now.strftime('%Y-%m-%d'),
-        "curr_month_start_baseline": prev_month_end.strftime('%Y-%m-%d'), # Baseline for current month
-        "prev_month_start_baseline": prev_2_month_end.strftime('%Y-%m-%d'), # Baseline for prev month
-        "prev_2_month_start_baseline": prev_3_month_end.strftime('%Y-%m-%d') # Baseline for 2 months ago
-    }
-    
-    readings = {}
-    for key, d_str in dates_to_fetch.items():
-        val = get_history_point(token, sn, d_str)
-        if val is not None:
-            readings[key] = val
-        time.sleep(1) # Be gentle with API
-    
-    summary = []
-    
-    # Calculate Current Month
-    if "now" in readings and "curr_month_start_baseline" in readings:
-        usage = max(0, readings["now"] - readings["curr_month_start_baseline"])
-        summary.append({
-            'month': now.strftime('%B %Y'),
-            'data': {'total_grid_kwh': usage, 'days': now.day}
-        })
-    
-    # Calculate Previous Month
-    if "curr_month_start_baseline" in readings and "prev_month_start_baseline" in readings:
-        usage = max(0, readings["curr_month_start_baseline"] - readings["prev_month_start_baseline"])
-        # Days in previous month
-        days_in_prev = (curr_month_start - prev_month_start).days
-        summary.append({
-            'month': prev_month_start.strftime('%B %Y'),
-            'data': {'total_grid_kwh': usage, 'days': days_in_prev}
-        })
-        
-    # Calculate 2 Months Ago
-    if "prev_month_start_baseline" in readings and "prev_2_month_start_baseline" in readings:
-        usage = max(0, readings["prev_month_start_baseline"] - readings["prev_2_month_start_baseline"])
-        days_in_prev_2 = (prev_month_start - prev_2_month_start).days
-        summary.append({
-            'month': prev_2_month_start.strftime('%B %Y'),
-            'data': {'total_grid_kwh': usage, 'days': days_in_prev_2}
-        })
-        
-    return summary
-
 # ----------------------------
 # 5. Polling Loop
 # ----------------------------
@@ -1004,9 +911,7 @@ def poll_growatt():
                 'pool_pump_last_alert': None,
                 'last_save': datetime.now(EAT),
                 'last_ml_save': datetime.now(EAT),
-                'prev_watts': 0,
-                'history_cache': [],
-                'last_history_fetch': None
+                'prev_watts': 0
             }
 
     polling_active = True
@@ -1218,19 +1123,6 @@ def poll_growatt():
 
                     heatmap = managers['history_manager'].get_last_30_days()
                     hourly_24h = managers['history_manager'].get_last_24h_data()
-                    
-                    # NAIROBI SPECIFIC: Historical Data Fetch
-                    monthly_data = managers.get('history_cache', [])
-                    if site_id == 'nairobi':
-                        # Fetch history every 60 minutes or on startup
-                        should_fetch = managers['last_history_fetch'] is None or (now - managers['last_history_fetch']) > timedelta(minutes=60)
-                        if should_fetch and config["serial_numbers"]:
-                            logger.info("Fetching historical grid data for Nairobi...")
-                            fetched_hist = fetch_nairobi_history(token, config["serial_numbers"][0])
-                            if fetched_hist:
-                                managers['history_cache'] = fetched_hist
-                                monthly_data = fetched_hist
-                            managers['last_history_fetch'] = now
 
                     managers['prev_watts'] = tot_out
                     
@@ -1255,7 +1147,6 @@ def poll_growatt():
                                 "inverters": inv_data,
                                 "heatmap_data": heatmap,
                                 "hourly_24h": hourly_24h,
-                                "monthly_summary": monthly_data,
                                 "ml_status": "Active",
                                 "heavy_loads_safe": heavy_loads_safe
                             },
@@ -1379,7 +1270,7 @@ def api_data():
                 "tier_labels": ['Primary', 'Backup', 'Reserve'],
                 "tier_colors": ['rgba(16, 185, 129, 0.9)', 'rgba(59, 130, 246, 0.8)', 'rgba(245, 158, 11, 0.8)']
             },
-            "scheduler": [], "heatmap_data": [], "hourly_24h": [], "monthly_summary": [], "ml_status": "Initializing"
+            "scheduler": [], "heatmap_data": [], "hourly_24h": [], "ml_status": "Initializing"
         })
     return jsonify(data)
 
@@ -1445,7 +1336,7 @@ def home():
                 "tier_labels": ['Primary', 'Backup', 'Reserve'],
                 "tier_colors": ['rgba(16, 185, 129, 0.9)', 'rgba(59, 130, 246, 0.8)', 'rgba(245, 158, 11, 0.8)']
             },
-            "scheduler": [], "heatmap_data": [], "hourly_24h": [], "monthly_summary": [], "ml_status": "Initializing"
+            "scheduler": [], "heatmap_data": [], "hourly_24h": [], "ml_status": "Initializing"
         }
 
     def _n(k): return float(d.get(k, 0) or 0)
@@ -1480,7 +1371,6 @@ def home():
     schedule = d.get("scheduler") or []
     heatmap = d.get("heatmap_data") or []
     hourly_24h = d.get("hourly_24h") or []
-    monthly_data = d.get("monthly_summary") or []
 
     st_txt, st_col = "NORMAL", "var(--info)"
     
@@ -2051,39 +1941,7 @@ def home():
         canvas {
             filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.2));
         }
-
-        /* Nairobi Bill Estimator Styles */
-        .bill-input {
-            background: rgba(0,0,0,0.2);
-            border: 1px solid var(--border);
-            color: var(--text);
-            padding: 8px;
-            border-radius: 6px;
-            width: 80px;
-            font-family: 'JetBrains Mono';
-        }
-        .bill-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 15px;
-        }
-        .bill-table th {
-            text-align: left;
-            color: var(--text-muted);
-            font-size: 0.8rem;
-            padding-bottom: 10px;
-            border-bottom: 1px solid var(--border);
-        }
-        .bill-table td {
-            padding: 12px 0;
-            border-bottom: 1px solid rgba(99,102,241,0.1);
-            font-size: 0.9rem;
-        }
-        .bill-cost {
-            color: var(--success);
-            font-weight: 700;
-            font-family: 'JetBrains Mono';
-        }
+        
     </style>
 </head>
 <body>
@@ -2155,43 +2013,6 @@ def home():
                 <div class="metric-val" style="color:var(--success)">{{ breakdown['total_pct'] }}<span style="font-size:1.2rem">%</span></div>
                 <div class="metric-unit">{{ breakdown['total_kwh'] }} kWh Usable</div>
             </div>
-
-            {% if site_id == 'nairobi' %}
-            <div class="col-12 card">
-                <div class="card-title" style="display:flex; justify-content:space-between; align-items:center;">
-                    <span>🔌 KPLC Grid Cost Estimator (3 Months)</span>
-                    <div style="display:flex; align-items:center; gap:10px;">
-                        <span style="font-size:0.8rem; text-transform:none;">Rate (KES/kWh):</span>
-                        <input type="number" id="kplcRate" class="bill-input" value="32" onchange="updateBill()" min="1">
-                    </div>
-                </div>
-                <div style="max-height: 300px; overflow-y: auto;">
-                    <table class="bill-table">
-                        <thead>
-                            <tr>
-                                <th>Month</th>
-                                <th>Days Tracked</th>
-                                <th>Grid Usage (kWh)</th>
-                                <th>Estimated Cost</th>
-                            </tr>
-                        </thead>
-                        <tbody id="billBody">
-                            {% for m in monthly_data %}
-                            <tr data-kwh="{{ m.data.total_grid_kwh }}">
-                                <td>{{ m.month }}</td>
-                                <td>{{ m.data.days }}</td>
-                                <td>{{ '%0.1f'|format(m.data.total_grid_kwh) }}</td>
-                                <td class="bill-cost">KES 0</td>
-                            </tr>
-                            {% endfor %}
-                            {% if not monthly_data %}
-                            <tr><td colspan="4" style="text-align:center; padding:20px; color:var(--text-dim)">No historical grid data yet</td></tr>
-                            {% endif %}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-            {% endif %}
 
             <div class="col-12 card">
                 <div class="card-title">30-Day Solar Efficiency Calendar</div>
@@ -2354,20 +2175,6 @@ def home():
         let activeSims = {};
         let simTierData = [];
         
-        // Nairobi Bill Calculator Logic
-        function updateBill() {
-            const rate = document.getElementById('kplcRate').value;
-            const rows = document.querySelectorAll('#billBody tr[data-kwh]');
-            rows.forEach(row => {
-                const kwh = parseFloat(row.getAttribute('data-kwh'));
-                const cost = kwh * rate;
-                row.querySelector('.bill-cost').innerText = "KES " + Math.round(cost).toLocaleString();
-            });
-        }
-        
-        // Initialize bill on load
-        if(document.getElementById('kplcRate')) { updateBill(); }
-
         Chart.defaults.color = '#94a3b8';
         Chart.defaults.borderColor = 'rgba(99, 102, 241, 0.2)';
         Chart.defaults.font.family = "'Manrope', sans-serif";
@@ -2802,7 +2609,7 @@ def home():
         gen_on=gen_on, detected=detected, st_txt=st_txt, st_col=st_col,
         is_charging=is_charging, is_discharging=is_discharging,
         s_fc=s_fc, l_fc=l_fc, sim=sim, breakdown=breakdown, schedule=schedule,
-        heatmap=heatmap, alerts=alerts, hourly_24h=hourly_24h, monthly_data=monthly_data,
+        heatmap=heatmap, alerts=alerts, hourly_24h=hourly_24h,
         tier_labels=tier_labels, primary_pct=primary_pct, 
         backup_voltage=backup_voltage, backup_pct=backup_pct,
         recommendation_items=recommendation_items, schedule_items=schedule_items,
