@@ -16,7 +16,7 @@ import joblib
 import warnings
 import logging
 
-# Configure logging to see errors in Railway console
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ app.secret_key = os.getenv("FLASK_SECRET_KEY", "solar-multisite-2026")
 
 # API Configuration
 API_URL = "https://openapi.growatt.com/v1/device/storage/storage_last_data"
+API_HISTORY_URL = "https://openapi.growatt.com/v1/device/storage/storage_history_data"
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
 DATA_FILE = "load_patterns.json"
 HISTORY_FILE = "daily_history.json"
@@ -374,18 +375,16 @@ class DailyHistoryManager:
     def get_last_24h_data(self):
         return self.hourly_data
 
-    def update_daily(self, date_str, total_consumption_wh, total_solar_wh, actual_irradiance_wh, grid_import_wh=0):
+    def update_daily(self, date_str, total_consumption_wh, total_solar_wh, actual_irradiance_wh):
         if date_str not in self.history:
             self.history[date_str] = {
                 'consumption': 0,
                 'solar': 0,
-                'potential': 0,
-                'grid_import': 0
+                'potential': 0
             }
         self.history[date_str]['consumption'] = total_consumption_wh
         self.history[date_str]['solar'] = total_solar_wh
         self.history[date_str]['potential'] = actual_irradiance_wh
-        self.history[date_str]['grid_import'] = grid_import_wh
 
     def get_last_30_days(self):
         now = datetime.now(EAT)
@@ -393,7 +392,7 @@ class DailyHistoryManager:
         for i in range(29, -1, -1):
             date = now - timedelta(days=i)
             date_str = date.strftime('%Y-%m-%d')
-            data = self.history.get(date_str, {'consumption': 0, 'solar': 0, 'potential': 0, 'grid_import': 0})
+            data = self.history.get(date_str, {'consumption': 0, 'solar': 0, 'potential': 0})
 
             efficiency = 0
             if data['potential'] > 0:
@@ -406,33 +405,9 @@ class DailyHistoryManager:
                 'weekday': date.strftime('%a'),
                 'consumption_kwh': round(data['consumption'] / 1000, 1),
                 'solar_kwh': round(data['solar'] / 1000, 1),
-                'grid_kwh': round(data.get('grid_import', 0) / 1000, 1),
                 'efficiency': round(efficiency, 0)
             })
         return result
-        
-    def get_monthly_summary(self):
-        # Group history by month
-        summary = defaultdict(lambda: {'total_grid_kwh': 0, 'days': 0})
-        now = datetime.now(EAT)
-        
-        for date_str, data in self.history.items():
-            try:
-                dt = datetime.strptime(date_str, '%Y-%m-%d')
-                month_key = dt.strftime('%B %Y')
-                summary[month_key]['total_grid_kwh'] += data.get('grid_import', 0) / 1000.0
-                summary[month_key]['days'] += 1
-            except:
-                continue
-        
-        # Ensure current month exists even if empty
-        current_month = now.strftime('%B %Y')
-        if current_month not in summary:
-             summary[current_month] = {'total_grid_kwh': 0, 'days': 0}
-             
-        # Sort by date (descending) logic requires parsing keys, simple dict sort for now
-        sorted_keys = sorted(summary.keys(), key=lambda x: datetime.strptime(x, '%B %Y'), reverse=True)
-        return [{'month': k, 'data': summary[k]} for k in sorted_keys]
 
 def identify_active_appliances(current, previous, gen_active, backup_volts, primary_pct, ml_detector_instance, site_id='kajiado'):
     detected = []
@@ -916,6 +891,98 @@ def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run, site_id='
     elif 1500 <= bat_discharge < 2000 and p_cap < 50: 
         send_email("ℹ️ Moderate Discharge", "Info", "moderate_load", send_via_email=b_active, site_id=site_id)
 
+def get_history_point(token, sn, date_str):
+    """Fetches the cumulative eToUserTotal for a specific date (last value of the day)"""
+    headers = headers_template.copy()
+    headers["token"] = token
+    # Growatt historical data usually requires a page parameter
+    payload = {"storage_sn": sn, "date": date_str, "page": 1} 
+    
+    try:
+        r = requests.post(API_HISTORY_URL, data=payload, headers=headers, timeout=10)
+        if r.status_code == 200:
+            json_resp = r.json()
+            if json_resp.get("code") == 0:
+                data_list = json_resp.get("data", {}).get("datas", [])
+                if data_list:
+                    # Look for the LAST valid reading of the day to get the end-of-day total
+                    # Reverse iteration to find the latest point in the day
+                    for reading in reversed(data_list):
+                        val = float(reading.get("eToUserTotal") or 0)
+                        if val > 0:
+                            return val
+    except Exception as e:
+        print(f"Failed to fetch history for {date_str}: {e}", flush=True)
+    return None
+
+def fetch_nairobi_history(token, sn):
+    """Fetch 3 months of historical grid usage based on cumulative totals"""
+    now = datetime.now(EAT)
+    
+    # Calculate key boundaries to get usage for "This Month", "Last Month", "Month Before Last"
+    # Usage Month X = (Cumulative Total at end of Month X) - (Cumulative Total at end of Month X-1)
+    
+    curr_month_start = now.replace(day=1)
+    
+    # Boundaries:
+    # 1. Now (Current reading)
+    # 2. End of Prev Month (which is Start of Current Month - 1 day)
+    # 3. End of 2 Months Ago (Start of Prev Month - 1 day)
+    # 4. End of 3 Months Ago (Start of 2 Months Ago - 1 day)
+    
+    prev_month_end = curr_month_start - timedelta(days=1)
+    prev_month_start = prev_month_end.replace(day=1)
+    
+    prev_2_month_end = prev_month_start - timedelta(days=1)
+    prev_2_month_start = prev_2_month_end.replace(day=1)
+    
+    prev_3_month_end = prev_2_month_start - timedelta(days=1)
+
+    dates_to_fetch = {
+        "now": now.strftime('%Y-%m-%d'),
+        "curr_month_start_baseline": prev_month_end.strftime('%Y-%m-%d'), # Baseline for current month
+        "prev_month_start_baseline": prev_2_month_end.strftime('%Y-%m-%d'), # Baseline for prev month
+        "prev_2_month_start_baseline": prev_3_month_end.strftime('%Y-%m-%d') # Baseline for 2 months ago
+    }
+    
+    readings = {}
+    for key, d_str in dates_to_fetch.items():
+        val = get_history_point(token, sn, d_str)
+        if val is not None:
+            readings[key] = val
+        time.sleep(1) # Be gentle with API
+    
+    summary = []
+    
+    # Calculate Current Month
+    if "now" in readings and "curr_month_start_baseline" in readings:
+        usage = max(0, readings["now"] - readings["curr_month_start_baseline"])
+        summary.append({
+            'month': now.strftime('%B %Y'),
+            'data': {'total_grid_kwh': usage, 'days': now.day}
+        })
+    
+    # Calculate Previous Month
+    if "curr_month_start_baseline" in readings and "prev_month_start_baseline" in readings:
+        usage = max(0, readings["curr_month_start_baseline"] - readings["prev_month_start_baseline"])
+        # Days in previous month
+        days_in_prev = (curr_month_start - prev_month_start).days
+        summary.append({
+            'month': prev_month_start.strftime('%B %Y'),
+            'data': {'total_grid_kwh': usage, 'days': days_in_prev}
+        })
+        
+    # Calculate 2 Months Ago
+    if "prev_month_start_baseline" in readings and "prev_2_month_start_baseline" in readings:
+        usage = max(0, readings["prev_month_start_baseline"] - readings["prev_2_month_start_baseline"])
+        days_in_prev_2 = (prev_month_start - prev_2_month_start).days
+        summary.append({
+            'month': prev_2_month_start.strftime('%B %Y'),
+            'data': {'total_grid_kwh': usage, 'days': days_in_prev_2}
+        })
+        
+    return summary
+
 # ----------------------------
 # 5. Polling Loop
 # ----------------------------
@@ -932,12 +999,14 @@ def poll_growatt():
                 'load_manager': PersistentLoadManager(f"{site_id}_{DATA_FILE}"),
                 'history_manager': DailyHistoryManager(f"{site_id}_{HISTORY_FILE}"),
                 'ml_detector': ApplianceDetector(config["appliance_type"]),
-                'daily_accumulator': {'consumption_wh': 0, 'solar_wh': 0, 'grid_import_wh': 0, 'last_date': None},
+                'daily_accumulator': {'consumption_wh': 0, 'solar_wh': 0, 'last_date': None},
                 'pool_pump_start_time': None,
                 'pool_pump_last_alert': None,
                 'last_save': datetime.now(EAT),
                 'last_ml_save': datetime.now(EAT),
-                'prev_watts': 0
+                'prev_watts': 0,
+                'history_cache': [],
+                'last_history_fetch': None
             }
 
     polling_active = True
@@ -954,7 +1023,7 @@ def poll_growatt():
                     wx_data = get_weather_forecast(config["latitude"], config["longitude"])
                     
                     now = datetime.now(EAT)
-                    tot_out, tot_sol, tot_bat, tot_grid, tot_grid_import_daily = 0, 0, 0, 0, 0
+                    tot_out, tot_sol, tot_bat, tot_grid = 0, 0, 0, 0
                     inv_data, p_caps = [], []
                     b_data, gen_on = None, False
 
@@ -983,10 +1052,6 @@ def poll_growatt():
                                         pb = float(d.get("pBat") or 0)
                                         sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
                                         grid_pwr = float(d.get("pAcInPut") or 0)
-                                        
-                                        # Use eToUserToday as primary source for grid consumption based on provided JSON
-                                        grid_import_today = float(d.get("eToUserToday") or d.get("eToUserToday") or 0) * 1000 # Convert to Wh
-                                        
                                         temp = max(
                                             float(d.get("invTemperature") or 0),
                                             float(d.get("dcDcTemperature") or 0),
@@ -997,8 +1062,6 @@ def poll_growatt():
                                         tot_out += op
                                         tot_sol += sol
                                         tot_grid += grid_pwr
-                                        tot_grid_import_daily += grid_import_today
-                                        
                                         if pb > 0: tot_bat += pb
 
                                         info = {
@@ -1043,10 +1106,6 @@ def poll_growatt():
                     b_act = b_data['OutputPower'] > 50 if b_data else False
 
                     current_date = now.strftime('%Y-%m-%d')
-                    
-                    # Store current day import for direct saving
-                    managers['daily_accumulator']['grid_import_wh'] = tot_grid_import_daily
-
                     if managers['daily_accumulator']['last_date'] != current_date:
                         if managers['daily_accumulator']['last_date']:
                             yesterday = now - timedelta(days=1)
@@ -1056,11 +1115,10 @@ def poll_growatt():
                                 managers['daily_accumulator']['last_date'],
                                 managers['daily_accumulator']['consumption_wh'],
                                 managers['daily_accumulator']['solar_wh'],
-                                actual_irradiance_wh,
-                                managers['daily_accumulator']['grid_import_wh']
+                                actual_irradiance_wh
                             )
                             managers['history_manager'].save_history()
-                        managers['daily_accumulator'] = {'consumption_wh': 0, 'solar_wh': 0, 'grid_import_wh': 0, 'last_date': current_date}
+                        managers['daily_accumulator'] = {'consumption_wh': 0, 'solar_wh': 0, 'last_date': current_date}
 
                     interval_hours = POLL_INTERVAL_MINUTES / 60.0
                     managers['daily_accumulator']['consumption_wh'] += tot_out * interval_hours
@@ -1160,19 +1218,19 @@ def poll_growatt():
 
                     heatmap = managers['history_manager'].get_last_30_days()
                     hourly_24h = managers['history_manager'].get_last_24h_data()
-                    monthly_data = managers['history_manager'].get_monthly_summary()
                     
-                    # Update monthly summary with current day's running total
-                    curr_month_key = now.strftime('%B %Y')
-                    found_month = False
-                    for m in monthly_data:
-                        if m['month'] == curr_month_key:
-                            m['data']['total_grid_kwh'] += (tot_grid_import_daily / 1000.0)
-                            m['data']['days'] += 1
-                            found_month = True
-                            break
-                    if not found_month:
-                        monthly_data.insert(0, {'month': curr_month_key, 'data': {'total_grid_kwh': tot_grid_import_daily/1000.0, 'days': 1}})
+                    # NAIROBI SPECIFIC: Historical Data Fetch
+                    monthly_data = managers.get('history_cache', [])
+                    if site_id == 'nairobi':
+                        # Fetch history every 60 minutes or on startup
+                        should_fetch = managers['last_history_fetch'] is None or (now - managers['last_history_fetch']) > timedelta(minutes=60)
+                        if should_fetch and config["serial_numbers"]:
+                            logger.info("Fetching historical grid data for Nairobi...")
+                            fetched_hist = fetch_nairobi_history(token, config["serial_numbers"][0])
+                            if fetched_hist:
+                                managers['history_cache'] = fetched_hist
+                                monthly_data = fetched_hist
+                            managers['last_history_fetch'] = now
 
                     managers['prev_watts'] = tot_out
                     
@@ -2101,7 +2159,7 @@ def home():
             {% if site_id == 'nairobi' %}
             <div class="col-12 card">
                 <div class="card-title" style="display:flex; justify-content:space-between; align-items:center;">
-                    <span>🔌 KPLC Grid Cost Estimator</span>
+                    <span>🔌 KPLC Grid Cost Estimator (3 Months)</span>
                     <div style="display:flex; align-items:center; gap:10px;">
                         <span style="font-size:0.8rem; text-transform:none;">Rate (KES/kWh):</span>
                         <input type="number" id="kplcRate" class="bill-input" value="32" onchange="updateBill()" min="1">
