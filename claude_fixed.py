@@ -120,6 +120,15 @@ class KPLCBillingTracker:
         self.auth_header = "Basic aVBXZkZTZTI2NkF2eVZHc2xpWk45Nl8yTzVzYTp3R3lRZEFFa3MzRm9lSkZHU0ZZUndFMERUdGNh"
         self.session = requests.Session()
         
+        # HEADERS FIX for 403 Forbidden
+        self.common_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Origin": "https://selfservice.kplc.co.ke",
+            "Referer": "https://selfservice.kplc.co.ke/public/",
+            "X-Self-Service-Channel": "WEB",
+            "Accept": "application/json, text/plain, */*"
+        }
+        
     def load_billing_data(self):
         """Load historical billing data from file"""
         try:
@@ -145,11 +154,10 @@ class KPLCBillingTracker:
     def get_api_token(self):
         """Generate a fresh session token from KPLC"""
         url = f"{self.base_url}/api/token"
-        headers = {
-            "Authorization": self.auth_header,
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "User-Agent": "Mozilla/5.0"
-        }
+        headers = self.common_headers.copy()
+        headers["Authorization"] = self.auth_header
+        headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
+
         try:
             resp = self.session.post(url, headers=headers, data="grant_type=client_credentials", timeout=10)
             if resp.status_code == 200:
@@ -168,11 +176,10 @@ class KPLCBillingTracker:
 
         # Endpoint found in logs
         url = f"{self.base_url}/api/publicData/4/newContractList"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0"
-        }
+        headers = self.common_headers.copy()
+        headers["Authorization"] = f"Bearer {token}"
+        headers["Content-Type"] = "application/json"
+
         # Use accountReference as per screenshot
         params = {"accountReference": self.account_number}
 
@@ -194,9 +201,6 @@ class KPLCBillingTracker:
         """Parse JSON response based on specific KPLC structure"""
         try:
             # 1. Navigate JSON structure (Data -> [0] -> colBills -> [0])
-            # The structure from your screenshot and logs:
-            # { data: [ { colBills: [ { ...bill data... } ] } ] }
-            
             if not data.get('data') or len(data['data']) == 0:
                 print("⚠️ KPLC: No 'data' field in response", flush=True)
                 return None
@@ -237,8 +241,7 @@ class KPLCBillingTracker:
             
             # Fallback if concept scanning failed but top-level units exist
             if total_kwh == 0 and not found_concepts:
-                print("⚠️ KPLC: No consumption concepts found, checking meter list...", flush=True)
-                # Could attempt to check meter readings here if needed, but concepts is standard
+                print("⚠️ KPLC: No consumption concepts found, using default.", flush=True)
             
             result = {
                 'month': month_str,
@@ -1644,6 +1647,142 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for('login'))
+
+@app.route('/update-kplc-billing')
+def update_kplc_billing():
+    """Deep Debug Endpoint: Runs KPLC checks manually and returns raw logs to browser."""
+    site_id, site_config = get_current_site()
+    
+    if site_id != "nairobi":
+        return jsonify({"error": "Only available for Nairobi site"}), 403
+    
+    logs = []
+    
+    def log(msg):
+        """Helper to add timestamped logs"""
+        logs.append(f"{datetime.now().strftime('%H:%M:%S')} - {msg}")
+
+    try:
+        # --- PHASE 1: PREPARATION ---
+        log("Starting Manual KPLC Check")
+        account_num = kplc_tracker.account_number
+        log(f"Target Account: {account_num}")
+        
+        # --- PHASE 2: AUTHENTICATION ---
+        token_url = "https://selfservice.kplc.co.ke/api/token"
+        auth_header = "Basic aVBXZkZTZTI2NkF2eVZHc2xpWk45Nl8yTzVzYTp3R3lRZEFFa3MzRm9lSkZHU0ZZUndFMERUdGNh"
+        
+        log("Requesting Access Token...")
+        try:
+            token_resp = requests.post(
+                token_url,
+                headers={
+                    "Authorization": auth_header,
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Origin": "https://selfservice.kplc.co.ke",
+                    "Referer": "https://selfservice.kplc.co.ke/public/",
+                    "X-Self-Service-Channel": "WEB"
+                },
+                data="grant_type=client_credentials",
+                timeout=10
+            )
+            log(f"Token Status: {token_resp.status_code}")
+            
+            if token_resp.status_code != 200:
+                return jsonify({
+                    "success": False, 
+                    "phase": "Auth", 
+                    "status": token_resp.status_code, 
+                    "response": token_resp.text,
+                    "logs": logs
+                })
+                
+            token = token_resp.json().get("access_token")
+            log(f"Token Received: {token[:10]}...")
+            
+        except Exception as e:
+            log(f"Token Connection Error: {str(e)}")
+            return jsonify({"success": False, "phase": "Auth Exception", "error": str(e), "logs": logs})
+
+        # --- PHASE 3: FETCHING BILL ---
+        bill_url = "https://selfservice.kplc.co.ke/api/publicData/4/newContractList"
+        log(f"Querying Endpoint: {bill_url}")
+        
+        try:
+            bill_resp = requests.get(
+                bill_url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Origin": "https://selfservice.kplc.co.ke",
+                    "Referer": "https://selfservice.kplc.co.ke/public/",
+                    "X-Self-Service-Channel": "WEB"
+                },
+                params={"accountReference": account_num},
+                timeout=15
+            )
+            log(f"Bill Fetch Status: {bill_resp.status_code}")
+            
+            if bill_resp.status_code != 200:
+                return jsonify({
+                    "success": False, 
+                    "phase": "Fetch", 
+                    "status": bill_resp.status_code, 
+                    "response": bill_resp.text,
+                    "logs": logs
+                })
+            
+            raw_data = bill_resp.json()
+            log("JSON Data received")
+            
+        except Exception as e:
+            log(f"Bill Connection Error: {str(e)}")
+            return jsonify({"success": False, "phase": "Fetch Exception", "error": str(e), "logs": logs})
+
+        # --- PHASE 4: PARSING ---
+        try:
+            data_block = raw_data.get('data', [])
+            if not data_block:
+                log("FAIL: 'data' field is empty or missing")
+                return jsonify({"success": False, "phase": "Parse", "error": "No data field", "raw": raw_data, "logs": logs})
+            
+            main_record = data_block[0]
+            col_bills = main_record.get('colBills', [])
+            
+            if not col_bills:
+                log("FAIL: 'colBills' is empty (No bills found for this account)")
+                return jsonify({"success": False, "phase": "Parse", "error": "No bills found", "raw": main_record, "logs": logs})
+            
+            latest = col_bills[0]
+            log(f"Found Bill: {latest.get('billNumber')} for {latest.get('amount')}")
+            
+            # --- PHASE 5: GROWATT COMPARISON ---
+            # If we got here, KPLC is working. Now check Growatt side.
+            bill_date_ms = latest.get('billDate')
+            bill_date = datetime.fromtimestamp(bill_date_ms / 1000.0)
+            
+            log(f"Bill Date: {bill_date}")
+            
+            # Trigger the actual app logic now that we validated the source
+            kplc_tracker.update_billing_comparison(site_config)
+            log("Triggered internal update function")
+            
+            return jsonify({
+                "success": True,
+                "message": "Debug Check Passed",
+                "logs": logs,
+                "latest_bill_raw": latest,
+                "current_summary": kplc_tracker.get_billing_summary()
+            })
+
+        except Exception as e:
+             log(f"Parsing Error: {str(e)}")
+             return jsonify({"success": False, "phase": "Parse Exception", "error": str(e), "raw": raw_data, "logs": logs})
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e), "logs": logs}), 500
 
 @app.route("/")
 def home():
