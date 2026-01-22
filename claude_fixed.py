@@ -2124,7 +2124,7 @@ def home():
                     </div>
                 </div>
                 
-                <h4 style="margin-bottom:5px; color:var(--text-dim)">Historical Usage (Last 3 Months)</h4>
+                <h4 style="margin-bottom:5px; color:var(--text-dim)">Historical Usage (Past Month)</h4>
                 <div id="kplcHistoryTable" style="margin-bottom:20px;">Loading history...</div>
 
                 <div style="padding-top:15px; border-top:1px solid var(--border)">
@@ -2134,86 +2134,6 @@ def home():
                         <button onclick="calculateCustomKPLC()">Calculate Cost</button>
                     </div>
                     <div id="calcResult" style="margin-top:10px; font-weight:700; color:var(--success); font-size:1.1rem"></div>
-                </div>
-            </div>
-
-            <div class="col-12 card">
-                <div class="card-title">🔌 Utility Grid Energy (KPLC)</div>
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px;">
-                    <!-- Import From Grid -->
-                    <div style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 12px; padding: 15px;">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                            <span style="color: var(--backup-color); font-weight: 700; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Import (To User)</span>
-                            <span style="font-size: 1.2rem;">📥</span>
-                        </div>
-                        <div style="display: flex; flex-direction: column; gap: 5px;">
-                            <div>
-                                <span style="color: var(--text-muted); font-size: 0.8rem;">Today</span>
-                                <div style="font-family: 'JetBrains Mono'; font-size: 1.4rem; font-weight: 700; color: #e2e8f5;">
-                                    {{ grid_stats['eToUserToday'] }} <span style="font-size: 0.9rem; color: var(--text-dim);">kWh</span>
-                                </div>
-                            </div>
-                            <div style="border-top: 1px solid rgba(59, 130, 246, 0.2); margin-top: 5px; padding-top: 5px;">
-                                <span style="color: var(--text-muted); font-size: 0.8rem;">Total</span>
-                                <div style="font-family: 'JetBrains Mono'; font-size: 1rem; color: var(--text-dim);">
-                                    {{ grid_stats['eToUserTotal'] }} kWh
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Export To Grid -->
-                    <div style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 12px; padding: 15px;">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                            <span style="color: var(--primary-color); font-weight: 700; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Export (To Grid)</span>
-                            <span style="font-size: 1.2rem;">📤</span>
-                        </div>
-                        <div style="display: flex; flex-direction: column; gap: 5px;">
-                            <div>
-                                <span style="color: var(--text-muted); font-size: 0.8rem;">Today</span>
-                                <div style="font-family: 'JetBrains Mono'; font-size: 1.4rem; font-weight: 700; color: #e2e8f5;">
-                                    {{ grid_stats['eToGridToday'] }} <span style="font-size: 0.9rem; color: var(--text-dim);">kWh</span>
-                                </div>
-                            </div>
-                            <div style="border-top: 1px solid rgba(16, 185, 129, 0.2); margin-top: 5px; padding-top: 5px;">
-                                <span style="color: var(--text-muted); font-size: 0.8rem;">Total</span>
-                                <div style="font-family: 'JetBrains Mono'; font-size: 1rem; color: var(--text-dim);">
-                                    {{ grid_stats['eToGridTotal'] }} kWh
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
-                <h4 style="margin:20px 0 10px 0; color:var(--text-dim); text-transform:uppercase; font-size:0.8rem; letter-spacing:1px;">Detailed Flow Statistics</h4>
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px;">
-                    <div style="background: rgba(99, 102, 241, 0.1); padding: 15px; border-radius:8px; border-left: 3px solid var(--accent);">
-                        <div style="color:var(--accent); font-size:0.8rem; font-weight:700">AC CHARGE (Grid → Bat)</div>
-                        <div style="font-weight:700; font-size:1.2rem; margin:5px 0">{{ grid_stats['eacChargeToday'] }} kWh</div>
-                        <div style="opacity:0.6; font-size:0.8rem; font-family:'JetBrains Mono'">Tot: {{ grid_stats['eacChargeTotal'] }}</div>
-                    </div>
-                    <div style="background: rgba(245, 158, 11, 0.1); padding: 15px; border-radius:8px; border-left: 3px solid var(--warn);">
-                        <div style="color:var(--warn); font-size:0.8rem; font-weight:700">BAT DISCHARGE (Bat → Load)</div>
-                        <div style="font-weight:700; font-size:1.2rem; margin:5px 0">{{ grid_stats['eBatDisChargeToday'] }} kWh</div>
-                        <div style="opacity:0.6; font-size:0.8rem; font-family:'JetBrains Mono'">Tot: {{ grid_stats['eBatDisChargeTotal'] }}</div>
-                    </div>
-                    <div style="background: rgba(255, 255, 255, 0.05); padding: 15px; border-radius:8px; border-left: 3px solid var(--text);">
-                        <div style="color:var(--text); font-size:0.8rem; font-weight:700">GRID BYPASS (Grid → Load)</div>
-                        <div style="font-weight:700; font-size:1.2rem; margin:5px 0">{{ grid_stats['eacDisChargeToday'] }} kWh</div>
-                        <div style="opacity:0.6; font-size:0.8rem; font-family:'JetBrains Mono'">Tot: {{ grid_stats['eacDisChargeTotal'] }}</div>
-                    </div>
-                </div>
-
-                <!-- HISTORICAL DATA LOOKUP -->
-                <div style="margin-top: 20px; border-top: 1px solid var(--border); padding-top: 15px;">
-                    <div style="font-size: 0.9rem; font-weight: 700; margin-bottom: 10px; color: var(--text);">📅 Historical Data Lookup</div>
-                    <div style="display:flex; gap:10px; align-items:center;">
-                        <input type="date" id="histDate" style="background:var(--bg); border:1px solid var(--border); color:var(--text); padding:8px; border-radius:6px; font-family:'Manrope';">
-                        <button onclick="fetchHistory()" style="background:var(--accent); color:white; border:none; padding:8px 15px; border-radius:6px; cursor:pointer; font-weight:600; font-family:'Manrope'; transition:background 0.2s;">Fetch</button>
-                    </div>
-                    <div id="histResult" style="margin-top:15px; display:none; grid-template-columns: 1fr 1fr; gap:10px;">
-                        <!-- Results injected here -->
-                    </div>
                 </div>
             </div>
             {% endif %}
@@ -2420,13 +2340,11 @@ def home():
                 return new Date(d.getTime() - offset).toISOString().split('T')[0];
             }
 
-            // Dates needed: Today, 1st of This Month, 1st of Last Month, 1st of 2 Months Ago, 1st of 3 Months Ago
+            // Dates needed: Today, 1st of This Month, 1st of Last Month
             const dates = [
                 fmt(now), // Today
                 fmt(new Date(y, m, 1)), // 1st Current
-                fmt(new Date(y, m-1, 1)), // 1st Last
-                fmt(new Date(y, m-2, 1)), // 1st -2
-                fmt(new Date(y, m-3, 1))  // 1st -3
+                fmt(new Date(y, m-1, 1))  // 1st Last
             ];
 
             // Fetch in parallel
@@ -2440,24 +2358,14 @@ def home():
             if(vals[0] > 0 && vals[1] > 0) currUsage = vals[0] - vals[1];
             document.getElementById('currMonthEst').innerHTML = `${currUsage.toFixed(1)} kWh <span style="font-size:0.9rem; color:var(--text-muted)">~ ${Math.round(currUsage * costPerUnit).toLocaleString()} KES</span>`;
 
-            // History Table
+            // History Table - Only Previous Month
             let html = '<table><tr><th>Month</th><th>Usage (kWh)</th><th>Est. Cost (KES)</th></tr>';
-            
-            // 1. Last Month: vals[1] (1st curr) - vals[2] (1st prev)
+
+            // Previous Month: vals[1] (1st curr) - vals[2] (1st prev)
             const usage1 = (vals[1] > 0 && vals[2] > 0) ? vals[1] - vals[2] : 0;
             const d1 = new Date(y, m-1, 1);
             html += `<tr><td>${d1.toLocaleString('default', { month: 'long' })}</td><td>${usage1.toFixed(1)}</td><td>${Math.round(usage1 * costPerUnit).toLocaleString()}</td></tr>`;
-            
-            // 2. 2 Mo Ago: vals[2] - vals[3]
-            const usage2 = (vals[2] > 0 && vals[3] > 0) ? vals[2] - vals[3] : 0;
-            const d2 = new Date(y, m-2, 1);
-            html += `<tr><td>${d2.toLocaleString('default', { month: 'long' })}</td><td>${usage2.toFixed(1)}</td><td>${Math.round(usage2 * costPerUnit).toLocaleString()}</td></tr>`;
-            
-            // 3. 3 Mo Ago: vals[3] - vals[4]
-            const usage3 = (vals[3] > 0 && vals[4] > 0) ? vals[3] - vals[4] : 0;
-            const d3 = new Date(y, m-3, 1);
-            html += `<tr><td>${d3.toLocaleString('default', { month: 'long' })}</td><td>${usage3.toFixed(1)}</td><td>${Math.round(usage3 * costPerUnit).toLocaleString()}</td></tr>`;
-            
+
             html += '</table>';
             document.getElementById('kplcHistoryTable').innerHTML = html;
         }
