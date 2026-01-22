@@ -2878,7 +2878,7 @@ async function loadKplcStats() {
         // Trigger load logic immediately if viewing Nairobi
         if(SITE_ID === 'nairobi') loadKplcStats();
         
-        setTimeout(() => location.reload(), 120000); 
+        setTimeout(() => location.reload(), 360000); 
     </script>
 </body>
 </html>
@@ -2903,4 +2903,5 @@ if __name__ == '__main__':
             Path(file).touch()
     
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+
 
