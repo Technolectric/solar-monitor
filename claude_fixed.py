@@ -16,9 +16,11 @@ import joblib
 import warnings
 import logging
 
-# Configure logging
+# Configure logging to see errors in Railway console
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Suppress warnings
 warnings.filterwarnings('ignore')
 
 print("🚀 Starting application initialization...", flush=True)
@@ -35,9 +37,8 @@ POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", 5))
 DATA_FILE = "load_patterns.json"
 HISTORY_FILE = "daily_history.json"
 ML_MODEL_FILE = "appliance_models.pkl"
-KPLC_BILLING_FILE = "kplc_billing_data.json"
 
-for file in [DATA_FILE, HISTORY_FILE, ML_MODEL_FILE, KPLC_BILLING_FILE]:
+for file in [DATA_FILE, HISTORY_FILE, ML_MODEL_FILE]:
     if not Path(file).exists():
         Path(file).touch()
         print(f"Created empty file: {file}", flush=True)
@@ -101,309 +102,6 @@ RECIPIENT_EMAIL = os.getenv('RECIPIENT_EMAIL')
 
 # Weather API Config
 WEATHERAPI_KEY = os.getenv('WEATHERAPI_KEY')
-
-# ----------------------------
-# KPLC Billing Integration (Nairobi Only)
-# ----------------------------
-class KPLCBillingTracker:
-    def __init__(self):
-        self.billing_file = KPLC_BILLING_FILE
-        self.account_number = os.getenv("KPLC_ACCOUNT_NUMBER", "2073344")
-        self.billing_data = self.load_billing_data()
-        self.data_lock = Lock()
-        
-        # API Configuration
-        self.base_url = "https://selfservice.kplc.co.ke"
-        # Public credentials from browser logs
-        self.auth_header = "Basic aVBXZkZTZTI2NkF2eVZHc2xpWk45Nl8yTzVzYTp3R3lRZEFFa3MzRm9lSkZHU0ZZUndFMERUdGNh"
-        self.session = requests.Session()
-        
-        # HEADERS FIX for 403 Forbidden
-        self.common_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Origin": "https://selfservice.kplc.co.ke",
-            "Referer": "https://selfservice.kplc.co.ke/public/",
-            "X-Self-Service-Channel": "WEB",
-            "Accept": "application/json, text/plain, */*"
-        }
-        
-    def load_billing_data(self):
-        """Load historical billing data from file"""
-        try:
-            if os.path.getsize(self.billing_file) > 0:
-                with open(self.billing_file, 'r') as f:
-                    return json.load(f)
-        except:
-            pass
-        return {
-            "historical_bills": [],
-            "current_forecast": None
-        }
-    
-    def save_billing_data(self):
-        """Save billing data to file"""
-        try:
-            with self.data_lock:
-                with open(self.billing_file, 'w') as f:
-                    json.dump(self.billing_data, f, indent=2)
-        except Exception as e:
-            print(f"Error saving billing data: {e}", flush=True)
-    
-    def get_api_token(self):
-        """Generate a fresh session token from KPLC"""
-        url = f"{self.base_url}/api/token"
-        headers = self.common_headers.copy()
-        headers["Authorization"] = self.auth_header
-        headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
-
-        try:
-            resp = self.session.post(url, headers=headers, data="grant_type=client_credentials", timeout=10)
-            if resp.status_code == 200:
-                return resp.json().get("access_token")
-            else:
-                print(f"KPLC Token Failed: {resp.status_code}", flush=True)
-        except Exception as e:
-            print(f"KPLC Token Error: {e}", flush=True)
-        return None
-
-    def scrape_kplc_bill(self):
-        """Fetch KPLC bill via API"""
-        token = self.get_api_token()
-        if not token: 
-            return None
-
-        # Endpoint found in logs
-        url = f"{self.base_url}/api/publicData/4/newContractList"
-        headers = self.common_headers.copy()
-        headers["Authorization"] = f"Bearer {token}"
-        headers["Content-Type"] = "application/json"
-
-        # Use accountReference as per screenshot
-        params = {"accountReference": self.account_number}
-
-        try:
-            print(f"🧾 Querying KPLC for {self.account_number}...", flush=True)
-            response = self.session.get(url, headers=headers, params=params, timeout=15)
-            
-            if response.status_code == 200:
-                data = response.json()
-                return self.parse_kplc_response(data)
-            else:
-                print(f"KPLC API Failed: {response.status_code}", flush=True)
-                print(f"Reason: {response.text}", flush=True)
-        except Exception as e:
-            print(f"Error fetching KPLC data: {e}", flush=True)
-        return None
-    
-    def parse_kplc_response(self, data):
-        """Parse JSON response based on specific KPLC structure"""
-        try:
-            if not data.get('data') or len(data['data']) == 0:
-                print("⚠️ KPLC: No 'data' field in response", flush=True)
-                return None
-            
-            main_record = data['data'][0]
-            
-            if not main_record.get('colBills') or len(main_record['colBills']) == 0:
-                print("⚠️ KPLC: No 'colBills' found for this account", flush=True)
-                return None
-            
-            latest = main_record['colBills'][0]
-            
-            # Extract Date (Timestamp is in milliseconds)
-            bill_ts = latest.get('billDate')
-            if bill_ts:
-                bill_date_obj = datetime.fromtimestamp(bill_ts / 1000.0)
-                bill_date_str = bill_date_obj.strftime("%Y-%m-%d")
-                month_str = bill_date_obj.strftime("%Y-%m")
-            else:
-                now = datetime.now()
-                bill_date_str = now.strftime("%Y-%m-%d")
-                month_str = now.strftime("%Y-%m")
-            
-            # Calculate Total kWh (Summing 'base' of Consumption concepts)
-            total_kwh = 0.0
-            found_concepts = False
-            
-            for item in latest.get('concepts', []):
-                name = item.get('conceptName', '')
-                unit = item.get('unit', '')
-                
-                # Check for consumption types (HighRate, LowRate, etc)
-                if 'Consumption' in name and unit == 'kWh':
-                    val = float(item.get('base', 0))
-                    total_kwh += val
-                    found_concepts = True
-            
-            if total_kwh == 0 and not found_concepts:
-                print("⚠️ KPLC: No consumption concepts found.", flush=True)
-            
-            result = {
-                'month': month_str,
-                'kwh': total_kwh,
-                'amount': float(latest.get('amount', 0)),
-                'bill_date': bill_date_str,
-            }
-            print(f"✅ Parsed KPLC Bill: {result}", flush=True)
-            return result
-
-        except Exception as e:
-            print(f"Error parsing KPLC data: {e}", flush=True)
-        return None
-    
-    def get_historical_kwh_from_growatt(self, site_config, start_date, end_date):
-        """Fetch historical eToUserTotal from Growatt for date range"""
-        try:
-            token = site_config['api_token']
-            if not site_config.get('serial_numbers'):
-                print("⚠️ No serial numbers configured for Growatt history fetch", flush=True)
-                return None
-                
-            serial_num = site_config['serial_numbers'][0]
-            hist_url = "https://openapi.growatt.com/v1/device/storage/storage_history_data"
-            headers = {"token": token}
-            
-            print(f"📊 Fetching Growatt History: {start_date.date()} to {end_date.date()}", flush=True)
-            
-            start_resp = requests.get(
-                hist_url,
-                headers=headers,
-                params={"sn": serial_num, "date": start_date.strftime("%Y-%m-%d")},
-                timeout=10
-            )
-            
-            end_resp = requests.get(
-                hist_url,
-                headers=headers,
-                params={"sn": serial_num, "date": end_date.strftime("%Y-%m-%d")},
-                timeout=10
-            )
-            
-            if start_resp.status_code == 200 and end_resp.status_code == 200:
-                start_data = start_resp.json()
-                end_data = end_resp.json()
-                
-                start_total = 0
-                end_total = 0
-                
-                if start_data.get('success') and start_data.get('data', {}).get('datas'):
-                    start_total = float(start_data['data']['datas'][0].get('eToUserTotal', 0))
-                
-                if end_data.get('success') and end_data.get('data', {}).get('datas'):
-                    end_total = float(end_data['data']['datas'][0].get('eToUserTotal', 0))
-                
-                if end_total == 0:
-                    print(f"⚠️ Growatt returned 0 for end date {end_date.date()}", flush=True)
-                    return None
-
-                period_kwh = end_total - start_total
-                
-                if period_kwh < 0: period_kwh = 0 
-                
-                return {
-                    'start_date': start_date.strftime("%Y-%m-%d"),
-                    'end_date': end_date.strftime("%Y-%m-%d"),
-                    'kwh_consumed': period_kwh,
-                    'start_total': start_total,
-                    'end_total': end_total
-                }
-            
-        except Exception as e:
-            print(f"Error fetching Growatt historical: {e}", flush=True)
-        return None
-    
-    def update_billing_comparison(self, site_config):
-        """Update billing data by comparing KPLC with Growatt"""
-        kplc_bill = self.scrape_kplc_bill()
-        
-        if kplc_bill and kplc_bill['month']:
-            existing = [b for b in self.billing_data['historical_bills'] 
-                       if b.get('month') == kplc_bill['month']]
-            
-            if not existing:
-                bill_month = datetime.strptime(kplc_bill['month'], "%Y-%m")
-                period_start = bill_month.replace(day=1)
-                next_month = bill_month.replace(day=28) + timedelta(days=4)
-                period_end = next_month - timedelta(days=next_month.day)
-                
-                growatt_data = self.get_historical_kwh_from_growatt(
-                    site_config, period_start, period_end
-                )
-                
-                if growatt_data:
-                    kwh_rate = kplc_bill['amount'] / kplc_bill['kwh'] if kplc_bill['kwh'] > 0 else 0
-                    
-                    bill_record = {
-                        'month': kplc_bill['month'],
-                        'kplc_kwh': kplc_bill['kwh'],
-                        'kplc_amount': kplc_bill['amount'],
-                        'growatt_kwh': growatt_data['kwh_consumed'],
-                        'kwh_rate': kwh_rate,
-                        'bill_date': kplc_bill['bill_date'],
-                        'match_accuracy': abs(kplc_bill['kwh'] - growatt_data['kwh_consumed']) / kplc_bill['kwh'] * 100 if kplc_bill['kwh'] > 0 else 0
-                    }
-                    
-                    self.billing_data['historical_bills'].append(bill_record)
-                    self.save_billing_data()
-                    print(f"✅ Added bill record for {kplc_bill['month']}", flush=True)
-                else:
-                    print(f"⚠️ Could not fetch Growatt data for {kplc_bill['month']} to compare", flush=True)
-        
-        self.update_forecast(site_config)
-    
-    def update_forecast(self, site_config):
-        """Forecast current month's bill"""
-        try:
-            now = datetime.now(EAT)
-            current_month = now.strftime("%Y-%m")
-            month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            
-            growatt_data = self.get_historical_kwh_from_growatt(site_config, month_start, now)
-            
-            if growatt_data:
-                if self.billing_data['historical_bills']:
-                    rates = [b['kwh_rate'] for b in self.billing_data['historical_bills'] 
-                            if b.get('kwh_rate', 0) > 0]
-                    avg_rate = sum(rates) / len(rates) if rates else 25.0
-                else:
-                    avg_rate = 25.0
-                
-                estimated_amount = growatt_data['kwh_consumed'] * avg_rate
-                
-                self.billing_data['current_forecast'] = {
-                    'month': current_month,
-                    'accumulated_kwh': growatt_data['kwh_consumed'],
-                    'estimated_amount': estimated_amount,
-                    'rate_used': avg_rate,
-                    'last_updated': now.isoformat(),
-                    'days_elapsed': (now - month_start).days
-                }
-                
-                self.save_billing_data()
-                
-        except Exception as e:
-            print(f"Error updating forecast: {e}", flush=True)
-    
-    def get_billing_summary(self):
-        """Get summary for display"""
-        summary = {
-            'historical_count': len(self.billing_data.get('historical_bills', [])),
-            'latest_bills': self.billing_data.get('historical_bills', [])[-3:],
-            'current_forecast': self.billing_data.get('current_forecast'),
-            'average_monthly_kwh': 0,
-            'average_monthly_cost': 0
-        }
-        
-        if self.billing_data.get('historical_bills'):
-            bills = self.billing_data['historical_bills']
-            if len(bills) > 0:
-                summary['average_monthly_kwh'] = sum(b.get('kplc_kwh', 0) for b in bills) / len(bills)
-                summary['average_monthly_cost'] = sum(b.get('kplc_amount', 0) for b in bills) / len(bills)
-        
-        return summary
-
-# Initialize KPLC tracker
-kplc_tracker = KPLCBillingTracker()
 
 # ----------------------------
 # 1. Machine Learning Appliance Detection
@@ -1202,9 +900,6 @@ site_managers = {}
 def poll_growatt():
     global site_latest_data, polling_active, last_communication, site_managers
 
-    # Flag to ensure we check KPLC once immediately on startup
-    kplc_startup_check_done = False 
-
     for site_id, config in SITES.items():
         if site_id not in site_managers:
             site_managers[site_id] = {
@@ -1459,17 +1154,6 @@ def poll_growatt():
                         }
                     
                     print(f"Update {site_id}: Load={tot_out}W, Bat={p_min}%", flush=True)
-                    
-                    # Update KPLC billing for Nairobi (Daily at 2 AM or Once on Startup)
-                    if site_id == "nairobi":
-                        current_hour = datetime.now(EAT).hour
-                        if current_hour == 2 or not kplc_startup_check_done:
-                            try:
-                                print(f"🔄 Triggering KPLC check (Startup={not kplc_startup_check_done})", flush=True)
-                                kplc_tracker.update_billing_comparison(config)
-                                kplc_startup_check_done = True 
-                            except Exception as e:
-                                print(f"Error updating KPLC billing: {e}", flush=True)
 
                 except Exception as e:
                     print(f"Error processing site {site_id}: {e}", flush=True)
@@ -1630,152 +1314,11 @@ def logout():
     session.clear()
     return redirect(url_for('login'))
 
-@app.route('/update-kplc-billing')
-def update_kplc_billing():
-    """Deep Debug Endpoint: Runs KPLC checks manually and returns raw logs to browser."""
-    site_id, site_config = get_current_site()
-    
-    if site_id != "nairobi":
-        return jsonify({"error": "Only available for Nairobi site"}), 403
-    
-    logs = []
-    
-    def log(msg):
-        """Helper to add timestamped logs"""
-        logs.append(f"{datetime.now().strftime('%H:%M:%S')} - {msg}")
-
-    try:
-        # --- PHASE 1: PREPARATION ---
-        log("Starting Manual KPLC Check")
-        account_num = kplc_tracker.account_number
-        log(f"Target Account: {account_num}")
-        
-        # --- PHASE 2: AUTHENTICATION ---
-        token_url = "https://selfservice.kplc.co.ke/api/token"
-        auth_header = "Basic aVBXZkZTZTI2NkF2eVZHc2xpWk45Nl8yTzVzYTp3R3lRZEFFa3MzRm9lSkZHU0ZZUndFMERUdGNh"
-        
-        log("Requesting Access Token...")
-        try:
-            token_resp = requests.post(
-                token_url,
-                headers={
-                    "Authorization": auth_header,
-                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Origin": "https://selfservice.kplc.co.ke",
-                    "Referer": "https://selfservice.kplc.co.ke/public/",
-                    "X-Self-Service-Channel": "WEB"
-                },
-                data="grant_type=client_credentials",
-                timeout=10
-            )
-            log(f"Token Status: {token_resp.status_code}")
-            
-            if token_resp.status_code != 200:
-                return jsonify({
-                    "success": False, 
-                    "phase": "Auth", 
-                    "status": token_resp.status_code, 
-                    "response": token_resp.text,
-                    "logs": logs
-                })
-                
-            token = token_resp.json().get("access_token")
-            log(f"Token Received: {token[:10]}...")
-            
-        except Exception as e:
-            log(f"Token Connection Error: {str(e)}")
-            return jsonify({"success": False, "phase": "Auth Exception", "error": str(e), "logs": logs})
-
-        # --- PHASE 3: FETCHING BILL ---
-        bill_url = "https://selfservice.kplc.co.ke/api/publicData/4/newContractList"
-        log(f"Querying Endpoint: {bill_url}")
-        
-        try:
-            bill_resp = requests.get(
-                bill_url,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Origin": "https://selfservice.kplc.co.ke",
-                    "Referer": "https://selfservice.kplc.co.ke/public/",
-                    "X-Self-Service-Channel": "WEB"
-                },
-                params={"accountReference": account_num},
-                timeout=15
-            )
-            log(f"Bill Fetch Status: {bill_resp.status_code}")
-            
-            if bill_resp.status_code != 200:
-                return jsonify({
-                    "success": False, 
-                    "phase": "Fetch", 
-                    "status": bill_resp.status_code, 
-                    "response": bill_resp.text,
-                    "logs": logs
-                })
-            
-            raw_data = bill_resp.json()
-            log("JSON Data received")
-            
-        except Exception as e:
-            log(f"Bill Connection Error: {str(e)}")
-            return jsonify({"success": False, "phase": "Fetch Exception", "error": str(e), "logs": logs})
-
-        # --- PHASE 4: PARSING ---
-        try:
-            data_block = raw_data.get('data', [])
-            if not data_block:
-                log("FAIL: 'data' field is empty or missing")
-                return jsonify({"success": False, "phase": "Parse", "error": "No data field", "raw": raw_data, "logs": logs})
-            
-            main_record = data_block[0]
-            col_bills = main_record.get('colBills', [])
-            
-            if not col_bills:
-                log("FAIL: 'colBills' is empty (No bills found for this account)")
-                return jsonify({"success": False, "phase": "Parse", "error": "No bills found", "raw": main_record, "logs": logs})
-            
-            latest = col_bills[0]
-            log(f"Found Bill: {latest.get('billNumber')} for {latest.get('amount')}")
-            
-            # --- PHASE 5: GROWATT COMPARISON ---
-            # If we got here, KPLC is working. Now check Growatt side.
-            bill_date_ms = latest.get('billDate')
-            bill_date = datetime.fromtimestamp(bill_date_ms / 1000.0)
-            
-            log(f"Bill Date: {bill_date}")
-            
-            # Trigger the actual app logic now that we validated the source
-            kplc_tracker.update_billing_comparison(site_config)
-            log("Triggered internal update function")
-            
-            return jsonify({
-                "success": True,
-                "message": "Debug Check Passed",
-                "logs": logs,
-                "latest_bill_raw": latest,
-                "current_summary": kplc_tracker.get_billing_summary()
-            })
-
-        except Exception as e:
-             log(f"Parsing Error: {str(e)}")
-             return jsonify({"success": False, "phase": "Parse Exception", "error": str(e), "raw": raw_data, "logs": logs})
-
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e), "logs": logs}), 500
-
 @app.route("/")
 def home():
     site_id, site_config = get_current_site()
     if not site_id:
         return redirect(url_for('login'))
-    
-    # Get billing summary for Nairobi site
-    billing_summary = None
-    if site_id == "nairobi":
-        billing_summary = kplc_tracker.get_billing_summary()
         
     d = site_latest_data.get(site_id, {}).get('data', {})
     
@@ -2500,92 +2043,6 @@ def home():
                 </div>
             </div>
 
-            {% if site_id == 'nairobi' and billing_summary %}
-            <div class="col-12 card" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
-                <div class="card-title" style="color: white;">⚡ KPLC Utility Bill Tracking</div>
-                
-                {% if billing_summary.current_forecast %}
-                <div style="background: rgba(255,255,255,0.15); padding: 20px; border-radius: 12px; margin-bottom: 20px;">
-                    <h3 style="font-size: 18px; margin-bottom: 15px; opacity: 0.9;">Current Month Forecast ({{ billing_summary.current_forecast.month }})</h3>
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px;">
-                        <div>
-                            <div style="opacity: 0.8; font-size: 13px;">Accumulated Usage</div>
-                            <div style="font-size: 28px; font-weight: bold;">{{ "%.1f"|format(billing_summary.current_forecast.accumulated_kwh) }} kWh</div>
-                        </div>
-                        <div>
-                            <div style="opacity: 0.8; font-size: 13px;">Estimated Bill</div>
-                            <div style="font-size: 28px; font-weight: bold;">KES {{ "{:,.0f}"|format(billing_summary.current_forecast.estimated_amount) }}</div>
-                        </div>
-                        <div>
-                            <div style="opacity: 0.8; font-size: 13px;">Rate Used</div>
-                            <div style="font-size: 20px; font-weight: 600;">KES {{ "%.2f"|format(billing_summary.current_forecast.rate_used) }}/kWh</div>
-                        </div>
-                        <div>
-                            <div style="opacity: 0.8; font-size: 13px;">Days Elapsed</div>
-                            <div style="font-size: 20px; font-weight: 600;">{{ billing_summary.current_forecast.days_elapsed }} days</div>
-                        </div>
-                    </div>
-                </div>
-                {% endif %}
-                
-                {% if billing_summary.latest_bills %}
-                <div style="background: white; color: #2c3e50; padding: 20px; border-radius: 12px; margin-bottom: 15px;">
-                    <h3 style="font-size: 16px; margin-bottom: 12px; color: #2c3e50;">Recent Bills - KPLC vs Growatt</h3>
-                    <div style="overflow-x: auto;">
-                        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-                            <thead>
-                                <tr style="background: #ecf0f1;">
-                                    <th style="padding: 10px; text-align: left;">Month</th>
-                                    <th style="padding: 10px; text-align: right;">KPLC kWh</th>
-                                    <th style="padding: 10px; text-align: right;">Growatt kWh</th>
-                                    <th style="padding: 10px; text-align: right;">Match</th>
-                                    <th style="padding: 10px; text-align: right;">Amount</th>
-                                    <th style="padding: 10px; text-align: right;">Rate</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {% for bill in billing_summary.latest_bills %}
-                                <tr style="border-bottom: 1px solid #ecf0f1;">
-                                    <td style="padding: 10px;">{{ bill.month }}</td>
-                                    <td style="padding: 10px; text-align: right; font-weight: 600;">{{ "%.1f"|format(bill.kplc_kwh) }}</td>
-                                    <td style="padding: 10px; text-align: right; color: #3498db;">{{ "%.1f"|format(bill.growatt_kwh) }}</td>
-                                    <td style="padding: 10px; text-align: right;">
-                                        <span style="padding: 4px 8px; border-radius: 12px; font-size: 11px; font-weight: 600;
-                                            {% if bill.match_accuracy <= 5 %}background: #27ae60; color: white;
-                                            {% elif bill.match_accuracy <= 10 %}background: #f39c12; color: white;
-                                            {% else %}background: #e74c3c; color: white;{% endif %}">
-                                            {{ "%.0f"|format(100 - bill.match_accuracy) }}%
-                                        </span>
-                                    </td>
-                                    <td style="padding: 10px; text-align: right; font-weight: 700;">KES {{ "{:,.0f}"|format(bill.kplc_amount) }}</td>
-                                    <td style="padding: 10px; text-align: right;">{{ "%.2f"|format(bill.kwh_rate) }}</td>
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-                {% endif %}
-                
-                {% if billing_summary.historical_count > 0 %}
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; background: rgba(255,255,255,0.1); padding: 15px; border-radius: 12px;">
-                    <div style="text-align: center;">
-                        <div style="opacity: 0.8; font-size: 12px;">Avg Monthly Usage</div>
-                        <div style="font-size: 22px; font-weight: bold;">{{ "%.0f"|format(billing_summary.average_monthly_kwh) }} kWh</div>
-                    </div>
-                    <div style="text-align: center;">
-                        <div style="opacity: 0.8; font-size: 12px;">Avg Monthly Cost</div>
-                        <div style="font-size: 22px; font-weight: bold;">KES {{ "{:,.0f}"|format(billing_summary.average_monthly_cost) }}</div>
-                    </div>
-                    <div style="text-align: center;">
-                        <div style="opacity: 0.8; font-size: 12px;">Bills Tracked</div>
-                        <div style="font-size: 22px; font-weight: bold;">{{ billing_summary.historical_count }}</div>
-                    </div>
-                </div>
-                {% endif %}
-            </div>
-            {% endif %}
-
             <div class="col-12 card">
                 <div class="card-title">Appliance Simulator</div>
                 <div class="sched-grid">
@@ -3146,45 +2603,18 @@ def home():
     </script>
 </body>
 </html>
-"""
-
-    return render_template_string(
-        html,
-        site_config=site_config,
-        billing_summary=billing_summary,
-        d=d,
-        load=load,
-        solar=solar,
-        bat_dis=bat_dis,
-        p_pct=p_pct,
-        b_volt=b_volt,
-        grid_watts=grid_watts,
-        gen_on=gen_on,
-        detected=detected,
-        heavy_loads_safe=heavy_loads_safe,
-        is_importing=is_importing,
-        breakdown=breakdown,
-        sim=sim,
-        s_fc=s_fc,
-        l_fc=l_fc,
-        schedule=schedule,
-        heatmap=heatmap,
-        hourly_24h=hourly_24h,
-        st_txt=st_txt,
-        st_col=st_col,
-        is_charging=is_charging,
-        is_discharging=is_discharging,
-        now=now,
-        is_night=is_night,
-        alerts=alerts,
-        tier_labels=tier_labels,
-        primary_pct=primary_pct,
-        backup_voltage=backup_voltage,
-        backup_pct=backup_pct,
-        surplus_power=surplus_power,
-        b_active=b_active,
-        schedule_items=schedule_items,
-        recommendation_items=recommendation_items
+    """
+    return render_template_string(html, 
+        d=d, solar=solar, load=load, p_pct=p_pct, b_volt=b_volt, 
+        gen_on=gen_on, detected=detected, st_txt=st_txt, st_col=st_col,
+        is_charging=is_charging, is_discharging=is_discharging,
+        s_fc=s_fc, l_fc=l_fc, sim=sim, breakdown=breakdown, schedule=schedule,
+        heatmap=heatmap, alerts=alerts, hourly_24h=hourly_24h,
+        tier_labels=tier_labels, primary_pct=primary_pct, 
+        backup_voltage=backup_voltage, backup_pct=backup_pct,
+        recommendation_items=recommendation_items, schedule_items=schedule_items,
+        heavy_loads_safe=heavy_loads_safe, site_config=site_config, site_id=site_id,
+        grid_watts=grid_watts, is_importing=is_importing
     )
 
 if __name__ == '__main__':
