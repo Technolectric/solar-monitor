@@ -64,8 +64,7 @@ SITES = {
         "solar_capacity_kw": 10,
         "latitude": -1.85238,
         "longitude": 36.77683,
-        "appliance_type": "home",
-        "inverter_type": "storage"  # Storage series inverter
+        "appliance_type": "home"
     },
     "nairobi": {
         "password": os.getenv("PASSWORD_NAIROBI"),
@@ -80,32 +79,14 @@ SITES = {
         "solar_capacity_kw": 5,
         "latitude": -1.2921,
         "longitude": 36.8219,
-        "appliance_type": "office",
-        "inverter_type": "storage"  # Storage series inverter
-    },
-    "mombasa": {
-        "password": os.getenv("PASSWORD_MOMBASA"),
-        "api_token": os.getenv("GROWATT_API_KEY_MOMBASA"),
-        "serial_numbers": os.getenv("SERIAL_NUMBERS_MOMBASA", "").split(",") if os.getenv("SERIAL_NUMBERS_MOMBASA") else [],
-        "label": "Mombasa Site Solar",
-        "recipient_email": os.getenv("RECIPIENT_EMAIL_MOMBASA", os.getenv("RECIPIENT_EMAIL")),
-        "inverter_config": {},
-        "primary_battery_wh": 0,  # Adjust based on actual setup
-        "backup_battery_wh": 0,
-        "backup_degradation": 0,
-        "solar_capacity_kw": 5,       # Adjust based on actual capacity
-        "latitude": -4.0435,          # Mombasa coordinates
-        "longitude": 39.6682,
-        "appliance_type": "office",
-        "inverter_type": "min"        # MIN inverter series
+        "appliance_type": "office"
     }
 }
 
-# Auto-config inverter labels
-for site_id, config in SITES.items():
-    for sn in config["serial_numbers"]:
-        if sn and sn not in config["inverter_config"]:
-            config["inverter_config"][sn] = {"label": f"Inverter {sn[-4:]}", "type": "primary"}
+# Auto-config Nairobi inverter
+_nbr_sn = SITES["nairobi"]["serial_numbers"][0] if SITES["nairobi"]["serial_numbers"] else None
+if _nbr_sn:
+    SITES["nairobi"]["inverter_config"][_nbr_sn] = {"label": "Primary Inverter", "type": "primary"}
 
 SOLAR_EFFICIENCY_FACTOR = 0.85
 EAT = timezone(timedelta(hours=3))
@@ -433,7 +414,7 @@ def identify_active_appliances(current, previous, gen_active, backup_volts, prim
     detected = []
     
     # Only block for Generator if not Nairobi (Nairobi has Utility which is normal)
-    if gen_active and site_id != 'nairobi' and site_id != 'mombasa':
+    if gen_active and site_id != 'nairobi':
         if primary_pct > 42:
             detected.append("Generator Load")
         else: 
@@ -451,6 +432,7 @@ def identify_active_appliances(current, previous, gen_active, backup_volts, prim
             detected.append(f"Load: {int(current)}W")
     
     return detected
+
 
 # ----------------------------
 # 3. Physics & Scheduler Engine
@@ -523,8 +505,8 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
         decision = {"msg": "Wait", "status": "unsafe", "color": "var(--warn)", "reason": ""}
         
         if gen_on:
-            if site_id == 'nairobi' or site_id == 'mombasa':
-                pass  # Nairobi and Mombasa have grid power, not generators
+            if site_id == 'nairobi':
+                pass 
             else:
                 decision.update({
                     "msg": "Generator On", 
@@ -532,7 +514,7 @@ def generate_smart_schedule(status, solar_forecast_kw=0, load_forecast_kw=0, now
                     "color": "var(--crit)",
                     "reason": "Generator running - no loads"
                 })
-        elif site_id == 'nairobi' or site_id == 'mombasa':
+        elif site_id == 'nairobi':
             decision.update({
                 "msg": "Grid Failure", 
                 "status": "unsafe",
@@ -887,7 +869,7 @@ def check_alerts(inv_data, solar, total_solar, bat_discharge, gen_run, site_id='
         if inv.get('high_temperature'): 
             send_email(f"🌡️ High Temp: {inv['Label']}", f"Temp: {inv['temperature']}", "high_temperature", site_id=site_id)
     
-    if site_id == 'nairobi' or site_id == 'mombasa':
+    if site_id == 'nairobi':
         if not gen_run:
             send_email("🚨 CRITICAL: Grid Failure", "No utility power - running on battery", "critical", site_id=site_id)
             return
@@ -952,7 +934,7 @@ def poll_growatt():
                     inv_data, p_caps = [], []
                     b_data, gen_on = None, False
                     
-                    # Initialize Grid Stats container
+                    # NEW: Initialize Grid Stats container
                     grid_stats = {
                         "eToUserToday": "0", "eToUserTotal": "0", "eToGridToday": "0", "eToGridTotal": "0",
                         "eacChargeToday": "0", "eacChargeTotal": "0", 
@@ -979,40 +961,18 @@ def poll_growatt():
                                     if json_resp.get("error_code") == 0:
                                         d = json_resp.get("data", {})
                                         
-                                        # Different field extraction based on inverter type
-                                        if config["inverter_type"] == "min":
-                                            # MIN inverter field names
-                                            op = float(d.get("pac") or 0)  # Inverter output power
-                                            cap = float(d.get("bmsSoc") or d.get("capacity") or 0)  # Battery capacity
-                                            vb = float(d.get("bmsVbat") or d.get("vBat") or 0)  # Battery voltage
-                                            pb = float(d.get("pBat") or 0)  # Battery power
-                                            sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0) + float(d.get("ppv3") or 0) + float(d.get("ppv4") or 0)
-                                            grid_pwr = float(d.get("pacToUserTotal") or 0)  # Grid power for MIN
-                                            temp = max(
-                                                float(d.get("temp1") or 0),
-                                                float(d.get("temp2") or 0),
-                                                float(d.get("temp3") or 0),
-                                                float(d.get("temp4") or 0),
-                                                float(d.get("temp5") or 0),
-                                                float(d.get("invTemperature") or 0),
-                                                float(d.get("dcDcTemperature") or 0),
-                                                float(d.get("temperature") or 0)
-                                            )
-                                            flt = int(d.get("errorCode") or d.get("faultType") or 0) != 0
-                                        else:
-                                            # Storage inverter field names
-                                            op = float(d.get("outPutPower") or 0)
-                                            cap = float(d.get("capacity") or 0)
-                                            vb = float(d.get("vBat") or 0)
-                                            pb = float(d.get("pBat") or 0)
-                                            sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
-                                            grid_pwr = float(d.get("pAcInPut") or 0)
-                                            temp = max(
-                                                float(d.get("invTemperature") or 0),
-                                                float(d.get("dcDcTemperature") or 0),
-                                                float(d.get("temperature") or 0)
-                                            )
-                                            flt = int(d.get("errorCode") or 0) != 0
+                                        op = float(d.get("outPutPower") or 0)
+                                        cap = float(d.get("capacity") or 0)
+                                        vb = float(d.get("vBat") or 0)
+                                        pb = float(d.get("pBat") or 0)
+                                        sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
+                                        grid_pwr = float(d.get("pAcInPut") or 0)
+                                        temp = max(
+                                            float(d.get("invTemperature") or 0),
+                                            float(d.get("dcDcTemperature") or 0),
+                                            float(d.get("temperature") or 0)
+                                        )
+                                        flt = int(d.get("errorCode") or 0) != 0
 
                                         tot_out += op
                                         tot_sol += sol
@@ -1029,46 +989,20 @@ def poll_growatt():
                                             "temperature": temp,
                                             "high_temperature": temp >= 60,
                                             "has_fault": flt,
-                                            "communication_lost": False,
-                                            "inverter_type": config["inverter_type"]
+                                            "communication_lost": False
                                         }
                                         inv_data.append(info)
 
                                         if inv_cfg['type'] == 'primary': 
                                             p_caps.append(cap)
-                                            # Check for grid availability
-                                            if config["inverter_type"] == "min":
-                                                # MIN inverter grid detection
-                                                vac1 = float(d.get("vac1") or 0)
-                                                if vac1 >= 180: 
-                                                    gen_on = True  # Grid available
-                                            else:
-                                                # Storage inverter grid detection
-                                                if site_id == 'nairobi' and float(d.get("vGrid") or 0) >= 180: 
-                                                    gen_on = True
+                                            if site_id == 'nairobi' and float(d.get("vGrid") or 0) >= 180: 
+                                                gen_on = True
                                         elif inv_cfg['type'] == 'backup':
                                             b_data = info
-                                            if float(d.get("vac") or 0) > 100 or float(d.get("pAcInPut") or 0) > 50: 
-                                                gen_on = True
+                                            if float(d.get("vac") or 0) > 100 or float(d.get("pAcInPut") or 0) > 50: gen_on = True
                                         
-                                        # Extract Grid Stats - Use MIN-specific fields for Mombasa
-                                        if config["inverter_type"] == "min":
-                                            # MIN inverter grid stats (etoUserTotal for KPLC consumption)
-                                            for k in grid_stats.keys():
-                                                if k == "eToUserTotal" and d.get("etoUserTotal"):
-                                                    grid_stats[k] = d.get("etoUserTotal")
-                                                elif d.get(k):
-                                                    grid_stats[k] = d.get(k)
-                                            # Also map MIN fields to standard field names
-                                            if d.get("etoUserToday"): grid_stats["eToUserToday"] = d.get("etoUserToday")
-                                            if d.get("etoGridToday"): grid_stats["eToGridToday"] = d.get("etoGridToday")
-                                            if d.get("etoGridTotal"): grid_stats["eToGridTotal"] = d.get("etoGridTotal")
-                                            if d.get("eacChargeToday"): grid_stats["eacChargeToday"] = d.get("eacChargeToday")
-                                            if d.get("eacChargeTotal"): grid_stats["eacChargeTotal"] = d.get("eacChargeTotal")
-                                            if d.get("edischargeToday"): grid_stats["eBatDisChargeToday"] = d.get("edischargeToday")
-                                            if d.get("edischargeTotal"): grid_stats["eBatDisChargeTotal"] = d.get("edischargeTotal")
-                                        else:
-                                            # Storage inverter grid stats
+                                        # Extract Specific Nairobi Fields
+                                        if site_id == 'nairobi':
                                             for k in grid_stats.keys():
                                                 if d.get(k): grid_stats[k] = d.get(k)
                                         
@@ -1084,8 +1018,7 @@ def poll_growatt():
                                 "Label": inv_cfg.get('label', sn), 
                                 "Type": inv_cfg.get('type'),
                                 "OutputPower": 0, "Capacity": 0, "vBat": 0, "temp": 0, "temperature": 0,
-                                "high_temperature": False, "has_fault": False, "communication_lost": True,
-                                "inverter_type": config["inverter_type"]
+                                "high_temperature": False, "has_fault": False, "communication_lost": True
                             })
 
                     p_min = min(p_caps) if p_caps else 0
@@ -1214,7 +1147,7 @@ def poll_growatt():
                                 "timestamp": now.strftime("%H:%M:%S"),
                                 "total_output_power": tot_out,
                                 "total_solar_input_W": tot_sol,
-                                "total_grid_input_W": tot_grid,
+                                "total_grid_input_W": tot_grid,  # Capture grid wattage
                                 "total_battery_discharge_W": tot_bat,
                                 "primary_battery_min": p_min,
                                 "backup_battery_voltage": b_volts,
@@ -1231,13 +1164,12 @@ def poll_growatt():
                                 "hourly_24h": hourly_24h,
                                 "ml_status": "Active",
                                 "heavy_loads_safe": heavy_loads_safe,
-                                "grid_stats": grid_stats,
-                                "inverter_type": config["inverter_type"]
+                                "grid_stats": grid_stats  # <-- ADDED GRID STATS HERE
                             },
                             "timestamp": now
                         }
                     
-                    print(f"Update {site_id} ({config['inverter_type']}): Load={tot_out}W, Bat={p_min}%", flush=True)
+                    print(f"Update {site_id}: Load={tot_out}W, Bat={p_min}%", flush=True)
 
                 except Exception as e:
                     print(f"Error processing site {site_id}: {e}", flush=True)
@@ -1386,32 +1318,18 @@ def get_history():
         
         last_record = records[-1]
         
-        # Extract fields based on inverter type
+        # Extract fields
         keys = [
             "eToUserToday", "eToUserTotal", "eToGridToday", "eToGridTotal",
             "eacChargeToday", "eacChargeTotal", 
             "eBatDisChargeToday", "eBatDisChargeTotal",
             "eacDisChargeToday", "eacDisChargeTotal"
         ]
+        result = {k: last_record.get(k, "0") for k in keys}
         
-        # For MIN inverters, use etoUserTotal for KPLC consumption
-        if config["inverter_type"] == "min":
-            # Map MIN fields to standard field names
-            result = {}
-            # Use etoUserTotal as the primary grid consumption metric
-            result["eToUserTotal"] = last_record.get("etoUserTotal", "0")
-            result["eToUserToday"] = last_record.get("etoUserToday", "0")
-            result["eToGridToday"] = last_record.get("etoGridToday", "0")
-            result["eToGridTotal"] = last_record.get("etoGridTotal", "0")
-            result["eacChargeToday"] = last_record.get("eacChargeToday", "0")
-            result["eacChargeTotal"] = last_record.get("eacChargeTotal", "0")
-            result["eBatDisChargeToday"] = last_record.get("edischargeToday", "0")
-            result["eBatDisChargeTotal"] = last_record.get("edischargeTotal", "0")
-            result["eacDisChargeToday"] = last_record.get("eacDisChargeToday", "0")
-            result["eacDisChargeTotal"] = last_record.get("eacDisChargeTotal", "0")
-        else:
-            # Storage inverter fields
-            result = {k: last_record.get(k, "0") for k in keys}
+        # Explicit check for eacDisChargeTotal as it is critical for KPLC
+        if not result["eacDisChargeTotal"] or result["eacDisChargeTotal"] == "0":
+             result["eacDisChargeTotal"] = last_record.get("eacDisChargeTotal", "0")
 
         return jsonify(result)
 
@@ -1439,8 +1357,7 @@ def api_data():
                 "tier_colors": ['rgba(16, 185, 129, 0.9)', 'rgba(59, 130, 246, 0.8)', 'rgba(245, 158, 11, 0.8)']
             },
             "scheduler": [], "heatmap_data": [], "hourly_24h": [], "ml_status": "Initializing",
-            "grid_stats": {"eToUserToday": "0", "eToUserTotal": "0", "eToGridToday": "0", "eToGridTotal": "0"},
-            "inverter_type": "unknown"
+            "grid_stats": {"eToUserToday": "0", "eToUserTotal": "0", "eToGridToday": "0", "eToGridTotal": "0"}
         })
     return jsonify(data)
 
@@ -1512,8 +1429,7 @@ def home():
                 "eacChargeToday": "0", "eacChargeTotal": "0", 
                 "eBatDisChargeToday": "0", "eBatDisChargeTotal": "0",
                 "eacDisChargeToday": "0", "eacDisChargeTotal": "0"
-            },
-            "inverter_type": site_config.get("inverter_type", "unknown")
+            }
         }
 
     def _n(k): return float(d.get(k, 0) or 0)
@@ -1527,7 +1443,6 @@ def home():
     gen_on = d.get("generator_running", False)
     detected = d.get("detected_appliances", [])
     heavy_loads_safe = d.get("heavy_loads_safe", False)
-    inverter_type = d.get("inverter_type", site_config.get("inverter_type", "unknown"))
     
     # Extract Grid Stats
     grid_stats = d.get("grid_stats", {
@@ -1560,8 +1475,8 @@ def home():
 
     st_txt, st_col = "NORMAL", "var(--info)"
     
-    # Site-specific logic
-    if site_id == 'nairobi' or site_id == 'mombasa':
+    # NAIROBI SPECIFIC LOGIC
+    if site_id == 'nairobi':
         if not gen_on:
             st_txt, st_col = "GRID FAILURE - BATTERY MODE", "var(--crit)"
         elif is_importing:
@@ -1569,7 +1484,7 @@ def home():
         else:
             st_txt, st_col = "GRID AVAILABLE - SOLAR MODE", "var(--success)"
     else:
-        # KAJIADO LOGIC
+        # KAJIADO / OTHER LOGIC
         if gen_on: 
             st_txt, st_col = "GENERATOR ON", "var(--crit)" 
         elif p_pct < 40: 
@@ -1659,11 +1574,11 @@ def home():
     schedule_blocks_heavy = any('No Safe Solar' in item.get('title', '') for item in schedule_items)
     
     if gen_on:
-        if site_id == 'nairobi' or site_id == 'mombasa':
+        if site_id == 'nairobi':
             recommendation_items.append({'icon': '✅', 'title': 'UTILITY POWER ACTIVE', 'description': 'Grid power available - normal operation', 'class': 'good'})
         else:
             recommendation_items.append({'icon': '🚨', 'title': 'NO HEAVY LOADS', 'description': 'Generator running - turn off all non-essential appliances', 'class': 'critical'})
-    elif site_id == 'nairobi' or site_id == 'mombasa':
+    elif site_id == 'nairobi':
         recommendation_items.append({'icon': '🚨', 'title': 'GRID FAILURE', 'description': 'No utility power - running on battery only', 'class': 'critical'})
     elif b_active:
         recommendation_items.append({'icon': '⚠️', 'title': 'MINIMIZE LOADS', 'description': 'Backup battery active - essential loads only', 'class': 'warning'})
@@ -1738,24 +1653,6 @@ def home():
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             letter-spacing: -0.5px;
-        }
-        
-        .site-info {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-            font-size: 0.9rem;
-            color: var(--text-muted);
-        }
-        
-        .inverter-badge {
-            background: rgba(99, 102, 241, 0.2);
-            border: 1px solid var(--accent);
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 0.75rem;
-            font-weight: 600;
-            text-transform: uppercase;
         }
         
         .status-badge {
@@ -2146,55 +2043,16 @@ def home():
             filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.2));
         }
         
-        /* KPLC Bill Estimator Styles */
+        /* New Table Style for KPLC */
         table { width: 100%; border-collapse: collapse; margin-top: 10px; }
         th, td { padding: 10px; text-align: left; border-bottom: 1px solid var(--border); }
         th { color: var(--text-muted); font-size: 0.8rem; text-transform: uppercase; }
         td { font-size: 0.9rem; color: var(--text); }
         input[type="number"], input[type="date"] {
             background: var(--bg-secondary); border: 1px solid var(--border); color: var(--text); padding: 8px; border-radius: 6px;
-            width: 100px;
         }
-        button { 
-            background: var(--accent); 
-            color: white; 
-            border: none; 
-            padding: 8px 16px; 
-            border-radius: 6px; 
-            cursor: pointer; 
-            font-weight: 600;
-            transition: all 0.2s;
-        }
-        button:hover { background: #4f46e5; transform: translateY(-1px); }
-        
-        .kplc-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin-top: 15px;
-        }
-        
-        .kplc-card {
-            background: rgba(59, 130, 246, 0.1);
-            border: 1px solid rgba(59, 130, 246, 0.3);
-            border-radius: 12px;
-            padding: 15px;
-            text-align: center;
-        }
-        
-        .kplc-value {
-            font-size: 1.5rem;
-            font-weight: 700;
-            color: var(--accent);
-            margin: 5px 0;
-        }
-        
-        .kplc-label {
-            font-size: 0.8rem;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
+        button { background: var(--accent); color: white; border: none; padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+        button:hover { background: #4f46e5; }
     </style>
 </head>
 <body>
@@ -2202,10 +2060,7 @@ def home():
         <div class="header">
             <div>
                 <h1>{{ '🏢' if site_config['appliance_type'] == 'office' else '🏠' }} {{ site_config['label']|upper }}</h1>
-                <div class="site-info">
-                    <span class="inverter-badge">{{ inverter_type|upper }} INVERTER</span>
-                    <span class="status-badge" style="border-color: {{ st_col }}; color: {{ st_col }}">{{ st_txt }}</span>
-                </div>
+                <span class="status-badge" style="border-color: {{ st_col }}; color: {{ st_col }}">{{ st_txt }}</span>
             </div>
             <div style="display:flex; align-items:center; gap:20px;">
                 <div class="time-display">{{ d['timestamp'] }}</div>
@@ -2220,16 +2075,16 @@ def home():
                     <div class="line line-v l-solar {{ 'flow-down' if solar > 50 else '' }}"><div class="dot"></div></div>
                     <div class="line line-v l-bat {{ 'flow-down' if is_charging else ('flow-up' if is_discharging else '') }}"><div class="dot"></div></div>
                     <div class="line line-h l-home {{ 'flow-right' if load > 100 else '' }}"><div class="dot"></div></div>
-                    <div class="line line-h l-gen {{ 'flow-right' if (site_id == 'nairobi' or site_id == 'mombasa') and is_importing else '' }}"><div class="dot"></div></div>
+                    <div class="line line-h l-gen {{ 'flow-right' if (site_id == 'nairobi' and is_importing) or (site_id != 'nairobi' and gen_on) else '' }}"><div class="dot"></div></div>
                     
                     <div class="node n-solar {{ 'pulse-y' if solar > 50 else '' }}">
                         <div class="node-icon">☀️</div>
                         <div class="node-val">{{ '%0.f'|format(solar) }}W</div>
                     </div>
-                    <div class="node n-gen {{ 'pulse-r' if (site_id != 'nairobi' and site_id != 'mombasa' and gen_on) else '' }}" style="{{ 'border-color:var(--info);' if (site_id == 'nairobi' or site_id == 'mombasa') and gen_on else '' }}">
-                        <div class="node-icon">{{ '🏭' if site_id == 'nairobi' or site_id == 'mombasa' else '⚙️' }}</div>
+                    <div class="node n-gen {{ 'pulse-r' if (site_id != 'nairobi' and gen_on) else '' }}" style="{{ 'border-color:var(--info);' if site_id == 'nairobi' and gen_on else '' }}">
+                        <div class="node-icon">{{ '🏭' if site_id == 'nairobi' else '⚙️' }}</div>
                         <div class="node-val">
-                            {% if site_id == 'nairobi' or site_id == 'mombasa' %}
+                            {% if site_id == 'nairobi' %}
                                 {{ '%0.f'|format(grid_watts) }}W
                             {% else %}
                                 {{ 'ON' if gen_on else 'OFF' }}
@@ -2237,7 +2092,7 @@ def home():
                         </div>
                     </div>
                     <div style="position: absolute; top: 110px; left: 5px; font-size: 0.7rem; color: var(--text-muted);">
-                        {{ 'KPLC Grid' if site_id == 'nairobi' or site_id == 'mombasa' else 'Generator' }}
+                        {{ 'KPLC Grid' if site_id == 'nairobi' else 'Generator' }}
                     </div>
                     <div class="node n-inv">
                         <div class="node-icon">⚡</div>
@@ -2254,14 +2109,14 @@ def home():
                 </div>
             </div>
 
-            <!-- KPLC BILL ESTIMATOR FOR NAIROBI AND MOMBASA -->
-            {% if site_id == 'nairobi' or site_id == 'mombasa' %}
+            <!-- NAIROBI SPECIFIC: KPLC BILL & GRID ENERGY STATS -->
+            {% if site_id == 'nairobi' %}
             <div class="col-12 card">
                 <h3>⚡ KPLC Bill Estimator</h3>
                 <div style="display:flex; gap:20px; flex-wrap:wrap; margin-bottom:20px; align-items:center;">
                     <div>
                         <label style="font-size:0.8rem; color:var(--text-muted)">Cost per kWh (KES)</label><br>
-                        <input type="number" id="kplcCost" value="35" onchange="saveCost()" style="margin-top:5px;">
+                        <input type="number" id="kplcCost" value="35" onchange="saveCost()" style="width:100px; margin-top:5px;">
                     </div>
                     <div>
                         <label style="font-size:0.8rem; color:var(--text-muted)">Current Month Est. (1st - Today)</label><br>
@@ -2269,31 +2124,7 @@ def home():
                     </div>
                 </div>
                 
-                <!-- Current Grid Stats -->
-                <h4 style="margin-bottom:5px; color:var(--text-dim)">Current Grid Statistics</h4>
-                <div class="kplc-grid">
-                    <div class="kplc-card">
-                        <div class="kplc-label">Today Import</div>
-                        <div class="kplc-value">{{ grid_stats['eToUserToday'] }} kWh</div>
-                    </div>
-                    <div class="kplc-card">
-                        <div class="kplc-label">Total Import</div>
-                        <div class="kplc-value">{{ grid_stats['eToUserTotal'] }} kWh</div>
-                        {% if site_id == 'mombasa' %}
-                        <div style="font-size:0.7rem; color:var(--text-muted); margin-top:5px;">(MIN: etoUserTotal)</div>
-                        {% endif %}
-                    </div>
-                    <div class="kplc-card">
-                        <div class="kplc-label">Today Export</div>
-                        <div class="kplc-value">{{ grid_stats['eToGridToday'] }} kWh</div>
-                    </div>
-                    <div class="kplc-card">
-                        <div class="kplc-label">Total Export</div>
-                        <div class="kplc-value">{{ grid_stats['eToGridTotal'] }} kWh</div>
-                    </div>
-                </div>
-                
-                <h4 style="margin-top:20px; margin-bottom:5px; color:var(--text-dim)">Historical Usage (Past Month)</h4>
+                <h4 style="margin-bottom:5px; color:var(--text-dim)">Historical Usage (Past Month)</h4>
                 <div id="kplcHistoryTable" style="margin-bottom:20px;">Loading history...</div>
 
                 <div style="padding-top:15px; border-top:1px solid var(--border)">
@@ -2472,7 +2303,6 @@ def home():
 
     <script>
         const SITE_ID = '{{ site_id }}';
-        const INVERTER_TYPE = '{{ inverter_type }}';
         
         // --- Persistence for Cost ---
         if(localStorage.getItem('kplcCost')) {
@@ -2487,76 +2317,64 @@ def home():
             loadKplcStats(); 
         }
 
-        // --- Helper to fetch single date total (using eToUserTotal for billable grid use) ---
+        // --- Helper to fetch single date total (using eacDisChargeTotal for billable grid use) ---
         async function fetchTotalForDate(dateStr) {
             try {
-                const r = await fetch('/api/history', { 
-                    method: 'POST', 
-                    headers: {'Content-Type': 'application/json'}, 
-                    body: JSON.stringify({site_id: SITE_ID, date: dateStr}) 
-                });
+                const r = await fetch('/api/history', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({site_id: SITE_ID, date: dateStr}) });
                 const d = await r.json();
-                // For MIN inverters, eToUserTotal contains etoUserTotal value
-                // For Storage inverters, eToUserTotal is directly available
-                return d.error ? 0 : parseFloat(d.eToUserTotal || 0);
-            } catch(e) { 
-                console.error('Error fetching history:', e);
-                return 0; 
-            }
+                // eacDisChargeTotal is "Grid total bypass load energy" - usually main grid consumption
+                return d.error ? 0 : parseFloat(d.eacDisChargeTotal || 0);
+            } catch { return 0; }
         }
 
-        // --- Main Logic for Monthly Stats ---
-        async function loadKplcStats() {
-            if(SITE_ID !== 'nairobi' && SITE_ID !== 'mombasa') return;
-            const costPerUnit = parseFloat(document.getElementById('kplcCost').value) || 0;
-            const now = new Date();
-            const y = now.getFullYear(), m = now.getMonth(); // 0-indexed
-            
-            // Helper to get YYYY-MM-DD in local time
-            const fmt = d => {
-                const offset = d.getTimezoneOffset() * 60000;
-                return new Date(d.getTime() - offset).toISOString().split('T')[0];
-            }
+     // --- Main Logic for Monthly Stats ---
+async function loadKplcStats() {
+    if(SITE_ID !== 'nairobi') return;
+    const costPerUnit = parseFloat(document.getElementById('kplcCost').value) || 0;
+    const now = new Date();
+    const y = now.getFullYear(), m = now.getMonth(); // 0-indexed
+    
+    // Helper to get YYYY-MM-DD in local time
+    const fmt = d => {
+        const offset = d.getTimezoneOffset() * 60000;
+        return new Date(d.getTime() - offset).toISOString().split('T')[0];
+    }
 
-            // We need: Today, 1st of This Month, 1st of Last Month, 1st of Month Before Last
-            const dates = [
-                fmt(now), // Today
-                fmt(new Date(y, m, 1)), // 1st Current Month
-                fmt(new Date(y, m-1, 1)), // 1st Last Month
-                fmt(new Date(y, m-2, 1))  // 1st Month Before Last
-            ];
+    // We need: Today, 1st of This Month, 1st of Last Month, 1st of Month Before Last
+    const dates = [
+        fmt(now), // Today
+        fmt(new Date(y, m, 1)), // 1st Current Month
+        fmt(new Date(y, m-1, 1)), // 1st Last Month
+        fmt(new Date(y, m-2, 1))  // 1st Month Before Last
+    ];
 
-            // Fetch in parallel
-            document.getElementById('currMonthEst').innerText = "Loading...";
-            document.getElementById('kplcHistoryTable').innerText = "Loading history...";
-            
-            const vals = await Promise.all(dates.map(d => fetchTotalForDate(d)));
-            
-            // Current Month Calculation (Today - Start of Current Month)
-            let currUsage = 0;
-            if(vals[0] > 0 && vals[1] > 0) currUsage = vals[0] - vals[1];
-            const currCost = Math.round(currUsage * costPerUnit);
-            document.getElementById('currMonthEst').innerHTML = `${currUsage.toFixed(1)} kWh <span style="font-size:0.9rem; color:var(--text-muted)">~ ${currCost.toLocaleString()} KES</span>`;
+    // Fetch in parallel
+    document.getElementById('currMonthEst').innerText = "Loading...";
+    document.getElementById('kplcHistoryTable').innerText = "Loading history...";
+    
+    const vals = await Promise.all(dates.map(d => fetchTotalForDate(d)));
+    
+    // Current Month Calculation (Today - Start of Current Month)
+    let currUsage = 0;
+    if(vals[0] > 0 && vals[1] > 0) currUsage = vals[0] - vals[1];
+    document.getElementById('currMonthEst').innerHTML = `${currUsage.toFixed(1)} kWh <span style="font-size:0.9rem; color:var(--text-muted)">~ ${Math.round(currUsage * costPerUnit).toLocaleString()} KES</span>`;
 
-            // History Table - Show actual months with correct labels
-            let html = '<table><tr><th>Month</th><th>Usage (kWh)</th><th>Est. Cost (KES)</th></tr>';
+    // History Table - Show actual months with correct labels
+    let html = '<table><tr><th>Month</th><th>Usage (kWh)</th><th>Est. Cost (KES)</th></tr>';
 
-            // Last Month (Actual - e.g., December if today is January)
-            const lastMonthUsage = (vals[1] > 0 && vals[2] > 0) ? vals[1] - vals[2] : 0;
-            const lastMonthDate = new Date(y, m-1, 1);
-            const lastMonthCost = Math.round(lastMonthUsage * costPerUnit);
-            html += `<tr><td>${lastMonthDate.toLocaleString('default', { month: 'long', year: 'numeric' })}</td><td>${lastMonthUsage.toFixed(1)}</td><td>${lastMonthCost.toLocaleString()}</td></tr>`;
+    // Last Month (Actual - e.g., December if today is January)
+    const lastMonthUsage = (vals[1] > 0 && vals[2] > 0) ? vals[1] - vals[2] : 0;
+    const lastMonthDate = new Date(y, m-1, 1);
+    html += `<tr><td>${lastMonthDate.toLocaleString('default', { month: 'long', year: 'numeric' })}</td><td>${lastMonthUsage.toFixed(1)}</td><td>${Math.round(lastMonthUsage * costPerUnit).toLocaleString()}</td></tr>`;
 
-            // Month Before Last (Actual - e.g., November if today is January)
-            const monthBeforeUsage = (vals[2] > 0 && vals[3] > 0) ? vals[2] - vals[3] : 0;
-            const monthBeforeDate = new Date(y, m-2, 1);
-            const monthBeforeCost = Math.round(monthBeforeUsage * costPerUnit);
-            html += `<tr><td>${monthBeforeDate.toLocaleString('default', { month: 'long', year: 'numeric' })}</td><td>${monthBeforeUsage.toFixed(1)}</td><td>${monthBeforeCost.toLocaleString()}</td></tr>`;
+    // Month Before Last (Actual - e.g., November if today is January)
+    const monthBeforeUsage = (vals[2] > 0 && vals[3] > 0) ? vals[2] - vals[3] : 0;
+    const monthBeforeDate = new Date(y, m-2, 1);
+    html += `<tr><td>${monthBeforeDate.toLocaleString('default', { month: 'long', year: 'numeric' })}</td><td>${monthBeforeUsage.toFixed(1)}</td><td>${Math.round(monthBeforeUsage * costPerUnit).toLocaleString()}</td></tr>`;
 
-            html += '</table>';
-            document.getElementById('kplcHistoryTable').innerHTML = html;
-        }
-
+    html += '</table>';
+    document.getElementById('kplcHistoryTable').innerHTML = html;
+}
         async function calculateCustomKPLC() {
             const start = document.getElementById('calcStart').value;
             const end = document.getElementById('calcEnd').value;
@@ -2571,8 +2389,7 @@ def home():
             
             if(vStart > 0 && vEnd > 0) {
                 const diff = vEnd - vStart;
-                const totalCost = Math.round(diff * cost);
-                div.innerHTML = `${diff.toFixed(1)} kWh  =  ${totalCost.toLocaleString()} KES`;
+                div.innerHTML = `${diff.toFixed(1)} kWh  =  ${Math.round(diff * cost).toLocaleString()} KES`;
             } else {
                 div.innerHTML = "Data unavailable for range";
             }
@@ -3058,8 +2875,8 @@ def home():
             if(!d.polling_thread_alive) fetch('/start-polling'); 
         });
         
-        // Trigger load logic immediately if viewing Nairobi or Mombasa
-        if(SITE_ID === 'nairobi' || SITE_ID === 'mombasa') loadKplcStats();
+        // Trigger load logic immediately if viewing Nairobi
+        if(SITE_ID === 'nairobi') loadKplcStats();
         
         setTimeout(() => location.reload(), 360000); 
     </script>
@@ -3077,7 +2894,7 @@ def home():
         recommendation_items=recommendation_items, schedule_items=schedule_items,
         heavy_loads_safe=heavy_loads_safe, site_config=site_config, site_id=site_id,
         grid_watts=grid_watts, is_importing=is_importing,
-        grid_stats=grid_stats, inverter_type=inverter_type
+        grid_stats=grid_stats
     )
 
 if __name__ == '__main__':
@@ -3086,4 +2903,3 @@ if __name__ == '__main__':
             Path(file).touch()
     
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
-
