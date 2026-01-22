@@ -430,7 +430,12 @@ def poll_growatt():
                     wx_data = get_weather_forecast(config["latitude"], config["longitude"])
                     now = datetime.now(EAT)
                     tot_out = 0; tot_sol = 0; tot_bat = 0; tot_grid = 0; inv_data = []; p_caps = []; gen_on = False; b_data = None
-                    grid_stats = {"eToUserToday": "0", "eToUserTotal": "0", "eToGridToday": "0", "eToGridTotal": "0"}
+                    grid_stats = {
+                        "eToUserToday": "0", "eToUserTotal": "0", "eToGridToday": "0", "eToGridTotal": "0",
+                        "eacChargeToday": "0", "eacChargeTotal": "0", 
+                        "eBatDisChargeToday": "0", "eBatDisChargeTotal": "0",
+                        "eacDisChargeToday": "0", "eacDisChargeTotal": "0"
+                    }
 
                     for sn in config["serial_numbers"]:
                         inv_cfg = config["inverter_config"].get(sn, {"label": sn, "type": "unknown"})
@@ -523,9 +528,8 @@ def get_history():
         config = SITES.get(site_id)
         if not config: return jsonify({'error': 'Invalid site'}), 404
         
-        # 1. First Request to get total count
         sn = config['serial_numbers'][0]
-        params = {'storage_sn': sn, 'start_date': date_str, 'end_date': date_str, 'page': 1, 'perpage': 100} # Safe page size
+        params = {'storage_sn': sn, 'start_date': date_str, 'end_date': date_str, 'page': 1, 'perpage': 100}
         headers = {"token": config['api_token'], "Content-Type": "application/x-www-form-urlencoded"}
         
         r = requests.post(API_HISTORY_URL, data=params, headers=headers, timeout=10)
@@ -536,10 +540,7 @@ def get_history():
         count = int(resp.get('data', {}).get('count', 0))
         if count == 0: return jsonify({'error': 'No data for date'}), 404
         
-        # 2. Calculate last page to get end-of-day data
         last_page = math.ceil(count / 100)
-        
-        # 3. Request last page if necessary
         if last_page > 1:
             params['page'] = last_page
             r = requests.post(API_HISTORY_URL, data=params, headers=headers, timeout=10)
@@ -548,12 +549,9 @@ def get_history():
         records = resp.get('data', {}).get('datas', [])
         if not records: return jsonify({'error': 'Data missing in last page'}), 404
         
-        # 4. Return the last record (accumulated total for the day)
         last_record = records[-1]
-        return jsonify({
-            "eToUserToday": last_record.get("eToUserToday", "0"), "eToUserTotal": last_record.get("eToUserTotal", "0"),
-            "eToGridToday": last_record.get("eToGridToday", "0"), "eToGridTotal": last_record.get("eToGridTotal", "0")
-        })
+        keys = ["eToUserToday", "eToUserTotal", "eToGridToday", "eToGridTotal", "eacChargeToday", "eacChargeTotal", "eBatDisChargeToday", "eBatDisChargeTotal", "eacDisChargeToday", "eacDisChargeTotal"]
+        return jsonify({k: last_record.get(k, "0") for k in keys})
 
     except Exception as e: return jsonify({'error': str(e)}), 500
 
@@ -635,6 +633,26 @@ def home():
                         <div style="opacity:0.7">Total: {{ grid_stats['eToGridTotal'] }} kWh</div>
                     </div>
                 </div>
+                
+                <h4 style="margin-bottom:10px">Detailed Flow Statistics</h4>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom:20px;">
+                    <div style="background: rgba(99, 102, 241, 0.1); padding: 12px; border-radius:8px;">
+                        <div style="color:var(--accent); font-size:0.8rem">AC CHARGE (Grid → Bat)</div>
+                        <div style="font-weight:700; font-size:1.2rem">{{ grid_stats['eacChargeToday'] }} kWh</div>
+                        <div style="opacity:0.6; font-size:0.8rem">Tot: {{ grid_stats['eacChargeTotal'] }}</div>
+                    </div>
+                    <div style="background: rgba(245, 158, 11, 0.1); padding: 12px; border-radius:8px;">
+                        <div style="color:var(--warn); font-size:0.8rem">BAT DISCHARGE (Bat → Load)</div>
+                        <div style="font-weight:700; font-size:1.2rem">{{ grid_stats['eBatDisChargeToday'] }} kWh</div>
+                        <div style="opacity:0.6; font-size:0.8rem">Tot: {{ grid_stats['eBatDisChargeTotal'] }}</div>
+                    </div>
+                    <div style="background: rgba(255, 255, 255, 0.05); padding: 12px; border-radius:8px;">
+                        <div style="color:var(--text); font-size:0.8rem">GRID BYPASS (Grid → Load)</div>
+                        <div style="font-weight:700; font-size:1.2rem">{{ grid_stats['eacDisChargeToday'] }} kWh</div>
+                        <div style="opacity:0.6; font-size:0.8rem">Tot: {{ grid_stats['eacDisChargeTotal'] }}</div>
+                    </div>
+                </div>
+
                 <div style="border-top:1px solid var(--border); padding-top:15px;">
                     <h4>📅 Historical Data Lookup</h4>
                     <div style="display:flex; gap:10px;">
@@ -667,7 +685,13 @@ def home():
                     '<div style="background:rgba(59,130,246,0.1); padding:10px; border-radius:8px;"><div>Import Today</div><b>' + d.eToUserToday + ' kWh</b></div>' +
                     '<div style="background:rgba(59,130,246,0.1); padding:10px; border-radius:8px;"><div>Import Total</div><b>' + d.eToUserTotal + ' kWh</b></div>' +
                     '<div style="background:rgba(16,185,129,0.1); padding:10px; border-radius:8px;"><div>Export Today</div><b>' + d.eToGridToday + ' kWh</b></div>' +
-                    '<div style="background:rgba(16,185,129,0.1); padding:10px; border-radius:8px;"><div>Export Total</div><b>' + d.eToGridTotal + ' kWh</b></div>';
+                    '<div style="background:rgba(16,185,129,0.1); padding:10px; border-radius:8px;"><div>Export Total</div><b>' + d.eToGridTotal + ' kWh</b></div>' +
+                    '<div style="background:rgba(99,102,241,0.1); padding:10px; border-radius:8px;"><div>AC Charge Today</div><b>' + d.eacChargeToday + ' kWh</b></div>' +
+                    '<div style="background:rgba(99,102,241,0.1); padding:10px; border-radius:8px;"><div>AC Charge Total</div><b>' + d.eacChargeTotal + ' kWh</b></div>' +
+                    '<div style="background:rgba(245,158,11,0.1); padding:10px; border-radius:8px;"><div>Bat Dischg Today</div><b>' + d.eBatDisChargeToday + ' kWh</b></div>' +
+                    '<div style="background:rgba(245,158,11,0.1); padding:10px; border-radius:8px;"><div>Bat Dischg Total</div><b>' + d.eBatDisChargeTotal + ' kWh</b></div>' +
+                    '<div style="background:rgba(255,255,255,0.05); padding:10px; border-radius:8px;"><div>Grid Bypass Today</div><b>' + d.eacDisChargeToday + ' kWh</b></div>' +
+                    '<div style="background:rgba(255,255,255,0.05); padding:10px; border-radius:8px;"><div>Grid Bypass Total</div><b>' + d.eacDisChargeTotal + ' kWh</b></div>';
             }).catch(e => resDiv.innerHTML = "Fetch failed");
         }
         
