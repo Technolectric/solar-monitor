@@ -7,7 +7,7 @@ import pandas as pd
 from datetime import datetime, timedelta, timezone
 from threading import Thread, Lock
 from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
-from collections import deque
+from collections import deque, defaultdict
 from pathlib import Path
 from sklearn.cluster import KMeans
 from sklearn.ensemble import RandomForestClassifier
@@ -374,16 +374,18 @@ class DailyHistoryManager:
     def get_last_24h_data(self):
         return self.hourly_data
 
-    def update_daily(self, date_str, total_consumption_wh, total_solar_wh, actual_irradiance_wh):
+    def update_daily(self, date_str, total_consumption_wh, total_solar_wh, actual_irradiance_wh, grid_import_wh=0):
         if date_str not in self.history:
             self.history[date_str] = {
                 'consumption': 0,
                 'solar': 0,
-                'potential': 0
+                'potential': 0,
+                'grid_import': 0
             }
         self.history[date_str]['consumption'] = total_consumption_wh
         self.history[date_str]['solar'] = total_solar_wh
         self.history[date_str]['potential'] = actual_irradiance_wh
+        self.history[date_str]['grid_import'] = grid_import_wh
 
     def get_last_30_days(self):
         now = datetime.now(EAT)
@@ -391,7 +393,7 @@ class DailyHistoryManager:
         for i in range(29, -1, -1):
             date = now - timedelta(days=i)
             date_str = date.strftime('%Y-%m-%d')
-            data = self.history.get(date_str, {'consumption': 0, 'solar': 0, 'potential': 0})
+            data = self.history.get(date_str, {'consumption': 0, 'solar': 0, 'potential': 0, 'grid_import': 0})
 
             efficiency = 0
             if data['potential'] > 0:
@@ -404,9 +406,33 @@ class DailyHistoryManager:
                 'weekday': date.strftime('%a'),
                 'consumption_kwh': round(data['consumption'] / 1000, 1),
                 'solar_kwh': round(data['solar'] / 1000, 1),
+                'grid_kwh': round(data.get('grid_import', 0) / 1000, 1),
                 'efficiency': round(efficiency, 0)
             })
         return result
+        
+    def get_monthly_summary(self):
+        # Group history by month
+        summary = defaultdict(lambda: {'total_grid_kwh': 0, 'days': 0})
+        now = datetime.now(EAT)
+        
+        for date_str, data in self.history.items():
+            try:
+                dt = datetime.strptime(date_str, '%Y-%m-%d')
+                month_key = dt.strftime('%B %Y')
+                summary[month_key]['total_grid_kwh'] += data.get('grid_import', 0) / 1000.0
+                summary[month_key]['days'] += 1
+            except:
+                continue
+        
+        # Ensure current month exists even if empty
+        current_month = now.strftime('%B %Y')
+        if current_month not in summary:
+             summary[current_month] = {'total_grid_kwh': 0, 'days': 0}
+             
+        # Sort by date (descending) logic requires parsing keys, simple dict sort for now
+        sorted_keys = sorted(summary.keys(), key=lambda x: datetime.strptime(x, '%B %Y'), reverse=True)
+        return [{'month': k, 'data': summary[k]} for k in sorted_keys]
 
 def identify_active_appliances(current, previous, gen_active, backup_volts, primary_pct, ml_detector_instance, site_id='kajiado'):
     detected = []
@@ -906,7 +932,7 @@ def poll_growatt():
                 'load_manager': PersistentLoadManager(f"{site_id}_{DATA_FILE}"),
                 'history_manager': DailyHistoryManager(f"{site_id}_{HISTORY_FILE}"),
                 'ml_detector': ApplianceDetector(config["appliance_type"]),
-                'daily_accumulator': {'consumption_wh': 0, 'solar_wh': 0, 'last_date': None},
+                'daily_accumulator': {'consumption_wh': 0, 'solar_wh': 0, 'grid_import_wh': 0, 'last_date': None},
                 'pool_pump_start_time': None,
                 'pool_pump_last_alert': None,
                 'last_save': datetime.now(EAT),
@@ -928,7 +954,7 @@ def poll_growatt():
                     wx_data = get_weather_forecast(config["latitude"], config["longitude"])
                     
                     now = datetime.now(EAT)
-                    tot_out, tot_sol, tot_bat, tot_grid = 0, 0, 0, 0
+                    tot_out, tot_sol, tot_bat, tot_grid, tot_grid_import_daily = 0, 0, 0, 0, 0
                     inv_data, p_caps = [], []
                     b_data, gen_on = None, False
 
@@ -957,6 +983,10 @@ def poll_growatt():
                                         pb = float(d.get("pBat") or 0)
                                         sol = float(d.get("ppv") or 0) + float(d.get("ppv2") or 0)
                                         grid_pwr = float(d.get("pAcInPut") or 0)
+                                        
+                                        # Use eToUserToday as primary source for grid consumption based on provided JSON
+                                        grid_import_today = float(d.get("eToUserToday") or d.get("eToUserToday") or 0) * 1000 # Convert to Wh
+                                        
                                         temp = max(
                                             float(d.get("invTemperature") or 0),
                                             float(d.get("dcDcTemperature") or 0),
@@ -967,6 +997,8 @@ def poll_growatt():
                                         tot_out += op
                                         tot_sol += sol
                                         tot_grid += grid_pwr
+                                        tot_grid_import_daily += grid_import_today
+                                        
                                         if pb > 0: tot_bat += pb
 
                                         info = {
@@ -1011,6 +1043,10 @@ def poll_growatt():
                     b_act = b_data['OutputPower'] > 50 if b_data else False
 
                     current_date = now.strftime('%Y-%m-%d')
+                    
+                    # Store current day import for direct saving
+                    managers['daily_accumulator']['grid_import_wh'] = tot_grid_import_daily
+
                     if managers['daily_accumulator']['last_date'] != current_date:
                         if managers['daily_accumulator']['last_date']:
                             yesterday = now - timedelta(days=1)
@@ -1020,10 +1056,11 @@ def poll_growatt():
                                 managers['daily_accumulator']['last_date'],
                                 managers['daily_accumulator']['consumption_wh'],
                                 managers['daily_accumulator']['solar_wh'],
-                                actual_irradiance_wh
+                                actual_irradiance_wh,
+                                managers['daily_accumulator']['grid_import_wh']
                             )
                             managers['history_manager'].save_history()
-                        managers['daily_accumulator'] = {'consumption_wh': 0, 'solar_wh': 0, 'last_date': current_date}
+                        managers['daily_accumulator'] = {'consumption_wh': 0, 'solar_wh': 0, 'grid_import_wh': 0, 'last_date': current_date}
 
                     interval_hours = POLL_INTERVAL_MINUTES / 60.0
                     managers['daily_accumulator']['consumption_wh'] += tot_out * interval_hours
@@ -1123,6 +1160,19 @@ def poll_growatt():
 
                     heatmap = managers['history_manager'].get_last_30_days()
                     hourly_24h = managers['history_manager'].get_last_24h_data()
+                    monthly_data = managers['history_manager'].get_monthly_summary()
+                    
+                    # Update monthly summary with current day's running total
+                    curr_month_key = now.strftime('%B %Y')
+                    found_month = False
+                    for m in monthly_data:
+                        if m['month'] == curr_month_key:
+                            m['data']['total_grid_kwh'] += (tot_grid_import_daily / 1000.0)
+                            m['data']['days'] += 1
+                            found_month = True
+                            break
+                    if not found_month:
+                        monthly_data.insert(0, {'month': curr_month_key, 'data': {'total_grid_kwh': tot_grid_import_daily/1000.0, 'days': 1}})
 
                     managers['prev_watts'] = tot_out
                     
@@ -1147,6 +1197,7 @@ def poll_growatt():
                                 "inverters": inv_data,
                                 "heatmap_data": heatmap,
                                 "hourly_24h": hourly_24h,
+                                "monthly_summary": monthly_data,
                                 "ml_status": "Active",
                                 "heavy_loads_safe": heavy_loads_safe
                             },
@@ -1270,7 +1321,7 @@ def api_data():
                 "tier_labels": ['Primary', 'Backup', 'Reserve'],
                 "tier_colors": ['rgba(16, 185, 129, 0.9)', 'rgba(59, 130, 246, 0.8)', 'rgba(245, 158, 11, 0.8)']
             },
-            "scheduler": [], "heatmap_data": [], "hourly_24h": [], "ml_status": "Initializing"
+            "scheduler": [], "heatmap_data": [], "hourly_24h": [], "monthly_summary": [], "ml_status": "Initializing"
         })
     return jsonify(data)
 
@@ -1336,7 +1387,7 @@ def home():
                 "tier_labels": ['Primary', 'Backup', 'Reserve'],
                 "tier_colors": ['rgba(16, 185, 129, 0.9)', 'rgba(59, 130, 246, 0.8)', 'rgba(245, 158, 11, 0.8)']
             },
-            "scheduler": [], "heatmap_data": [], "hourly_24h": [], "ml_status": "Initializing"
+            "scheduler": [], "heatmap_data": [], "hourly_24h": [], "monthly_summary": [], "ml_status": "Initializing"
         }
 
     def _n(k): return float(d.get(k, 0) or 0)
@@ -1371,6 +1422,7 @@ def home():
     schedule = d.get("scheduler") or []
     heatmap = d.get("heatmap_data") or []
     hourly_24h = d.get("hourly_24h") or []
+    monthly_data = d.get("monthly_summary") or []
 
     st_txt, st_col = "NORMAL", "var(--info)"
     
@@ -1941,7 +1993,39 @@ def home():
         canvas {
             filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.2));
         }
-        
+
+        /* Nairobi Bill Estimator Styles */
+        .bill-input {
+            background: rgba(0,0,0,0.2);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 8px;
+            border-radius: 6px;
+            width: 80px;
+            font-family: 'JetBrains Mono';
+        }
+        .bill-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+        .bill-table th {
+            text-align: left;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+        .bill-table td {
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(99,102,241,0.1);
+            font-size: 0.9rem;
+        }
+        .bill-cost {
+            color: var(--success);
+            font-weight: 700;
+            font-family: 'JetBrains Mono';
+        }
     </style>
 </head>
 <body>
@@ -2013,6 +2097,43 @@ def home():
                 <div class="metric-val" style="color:var(--success)">{{ breakdown['total_pct'] }}<span style="font-size:1.2rem">%</span></div>
                 <div class="metric-unit">{{ breakdown['total_kwh'] }} kWh Usable</div>
             </div>
+
+            {% if site_id == 'nairobi' %}
+            <div class="col-12 card">
+                <div class="card-title" style="display:flex; justify-content:space-between; align-items:center;">
+                    <span>🔌 KPLC Grid Cost Estimator</span>
+                    <div style="display:flex; align-items:center; gap:10px;">
+                        <span style="font-size:0.8rem; text-transform:none;">Rate (KES/kWh):</span>
+                        <input type="number" id="kplcRate" class="bill-input" value="32" onchange="updateBill()" min="1">
+                    </div>
+                </div>
+                <div style="max-height: 300px; overflow-y: auto;">
+                    <table class="bill-table">
+                        <thead>
+                            <tr>
+                                <th>Month</th>
+                                <th>Days Tracked</th>
+                                <th>Grid Usage (kWh)</th>
+                                <th>Estimated Cost</th>
+                            </tr>
+                        </thead>
+                        <tbody id="billBody">
+                            {% for m in monthly_data %}
+                            <tr data-kwh="{{ m.data.total_grid_kwh }}">
+                                <td>{{ m.month }}</td>
+                                <td>{{ m.data.days }}</td>
+                                <td>{{ '%0.1f'|format(m.data.total_grid_kwh) }}</td>
+                                <td class="bill-cost">KES 0</td>
+                            </tr>
+                            {% endfor %}
+                            {% if not monthly_data %}
+                            <tr><td colspan="4" style="text-align:center; padding:20px; color:var(--text-dim)">No historical grid data yet</td></tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {% endif %}
 
             <div class="col-12 card">
                 <div class="card-title">30-Day Solar Efficiency Calendar</div>
@@ -2175,6 +2296,20 @@ def home():
         let activeSims = {};
         let simTierData = [];
         
+        // Nairobi Bill Calculator Logic
+        function updateBill() {
+            const rate = document.getElementById('kplcRate').value;
+            const rows = document.querySelectorAll('#billBody tr[data-kwh]');
+            rows.forEach(row => {
+                const kwh = parseFloat(row.getAttribute('data-kwh'));
+                const cost = kwh * rate;
+                row.querySelector('.bill-cost').innerText = "KES " + Math.round(cost).toLocaleString();
+            });
+        }
+        
+        // Initialize bill on load
+        if(document.getElementById('kplcRate')) { updateBill(); }
+
         Chart.defaults.color = '#94a3b8';
         Chart.defaults.borderColor = 'rgba(99, 102, 241, 0.2)';
         Chart.defaults.font.family = "'Manrope', sans-serif";
@@ -2609,7 +2744,7 @@ def home():
         gen_on=gen_on, detected=detected, st_txt=st_txt, st_col=st_col,
         is_charging=is_charging, is_discharging=is_discharging,
         s_fc=s_fc, l_fc=l_fc, sim=sim, breakdown=breakdown, schedule=schedule,
-        heatmap=heatmap, alerts=alerts, hourly_24h=hourly_24h,
+        heatmap=heatmap, alerts=alerts, hourly_24h=hourly_24h, monthly_data=monthly_data,
         tier_labels=tier_labels, primary_pct=primary_pct, 
         backup_voltage=backup_voltage, backup_pct=backup_pct,
         recommendation_items=recommendation_items, schedule_items=schedule_items,
