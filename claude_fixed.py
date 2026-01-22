@@ -931,6 +931,12 @@ def poll_growatt():
                     tot_out, tot_sol, tot_bat, tot_grid = 0, 0, 0, 0
                     inv_data, p_caps = [], []
                     b_data, gen_on = None, False
+                    
+                    # NEW: Initialize Grid Stats container
+                    grid_stats = {
+                        "eToUserToday": "0", "eToUserTotal": "0",
+                        "eToGridToday": "0", "eToGridTotal": "0"
+                    }
 
                     for sn in config["serial_numbers"]:
                         inv_cfg = config["inverter_config"].get(sn, {"label": sn, "type": "unknown"})
@@ -990,6 +996,13 @@ def poll_growatt():
                                         elif inv_cfg['type'] == 'backup':
                                             b_data = info
                                             if float(d.get("vac") or 0) > 100 or float(d.get("pAcInPut") or 0) > 50: gen_on = True
+                                        
+                                        # --- NEW: Extract Grid Energy Data ---
+                                        if site_id == 'nairobi':
+                                            if d.get("eToUserToday"): grid_stats["eToUserToday"] = d.get("eToUserToday")
+                                            if d.get("eToUserTotal"): grid_stats["eToUserTotal"] = d.get("eToUserTotal")
+                                            if d.get("eToGridToday"): grid_stats["eToGridToday"] = d.get("eToGridToday")
+                                            if d.get("eToGridTotal"): grid_stats["eToGridTotal"] = d.get("eToGridTotal")
                                         
                                         success = True
                                         break
@@ -1148,7 +1161,8 @@ def poll_growatt():
                                 "heatmap_data": heatmap,
                                 "hourly_24h": hourly_24h,
                                 "ml_status": "Active",
-                                "heavy_loads_safe": heavy_loads_safe
+                                "heavy_loads_safe": heavy_loads_safe,
+                                "grid_stats": grid_stats  # <-- ADDED GRID STATS HERE
                             },
                             "timestamp": now
                         }
@@ -1270,7 +1284,8 @@ def api_data():
                 "tier_labels": ['Primary', 'Backup', 'Reserve'],
                 "tier_colors": ['rgba(16, 185, 129, 0.9)', 'rgba(59, 130, 246, 0.8)', 'rgba(245, 158, 11, 0.8)']
             },
-            "scheduler": [], "heatmap_data": [], "hourly_24h": [], "ml_status": "Initializing"
+            "scheduler": [], "heatmap_data": [], "hourly_24h": [], "ml_status": "Initializing",
+            "grid_stats": {"eToUserToday": "0", "eToUserTotal": "0", "eToGridToday": "0", "eToGridTotal": "0"}
         })
     return jsonify(data)
 
@@ -1336,7 +1351,8 @@ def home():
                 "tier_labels": ['Primary', 'Backup', 'Reserve'],
                 "tier_colors": ['rgba(16, 185, 129, 0.9)', 'rgba(59, 130, 246, 0.8)', 'rgba(245, 158, 11, 0.8)']
             },
-            "scheduler": [], "heatmap_data": [], "hourly_24h": [], "ml_status": "Initializing"
+            "scheduler": [], "heatmap_data": [], "hourly_24h": [], "ml_status": "Initializing",
+            "grid_stats": {"eToUserToday": "0", "eToUserTotal": "0", "eToGridToday": "0", "eToGridTotal": "0"}
         }
 
     def _n(k): return float(d.get(k, 0) or 0)
@@ -1350,6 +1366,12 @@ def home():
     gen_on = d.get("generator_running", False)
     detected = d.get("detected_appliances", [])
     heavy_loads_safe = d.get("heavy_loads_safe", False)
+    
+    # NEW: Extract Grid Stats
+    grid_stats = d.get("grid_stats", {
+        "eToUserToday": "0", "eToUserTotal": "0",
+        "eToGridToday": "0", "eToGridTotal": "0"
+    })
     
     # Determine actual grid import (threshold for noise)
     is_importing = grid_watts > 20
@@ -1998,6 +2020,58 @@ def home():
                 </div>
             </div>
 
+            <!-- NAIROBI SPECIFIC: GRID ENERGY STATS -->
+            {% if site_id == 'nairobi' %}
+            <div class="col-12 card">
+                <div class="card-title">🔌 Utility Grid Energy (KPLC)</div>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px;">
+                    <!-- Import From Grid -->
+                    <div style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 12px; padding: 15px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                            <span style="color: var(--backup-color); font-weight: 700; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Import (To User)</span>
+                            <span style="font-size: 1.2rem;">📥</span>
+                        </div>
+                        <div style="display: flex; flex-direction: column; gap: 5px;">
+                            <div>
+                                <span style="color: var(--text-muted); font-size: 0.8rem;">Today</span>
+                                <div style="font-family: 'JetBrains Mono'; font-size: 1.4rem; font-weight: 700; color: #e2e8f5;">
+                                    {{ grid_stats['eToUserToday'] }} <span style="font-size: 0.9rem; color: var(--text-dim);">kWh</span>
+                                </div>
+                            </div>
+                            <div style="border-top: 1px solid rgba(59, 130, 246, 0.2); margin-top: 5px; padding-top: 5px;">
+                                <span style="color: var(--text-muted); font-size: 0.8rem;">Total</span>
+                                <div style="font-family: 'JetBrains Mono'; font-size: 1rem; color: var(--text-dim);">
+                                    {{ grid_stats['eToUserTotal'] }} kWh
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Export To Grid -->
+                    <div style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 12px; padding: 15px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                            <span style="color: var(--primary-color); font-weight: 700; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">Export (To Grid)</span>
+                            <span style="font-size: 1.2rem;">📤</span>
+                        </div>
+                        <div style="display: flex; flex-direction: column; gap: 5px;">
+                            <div>
+                                <span style="color: var(--text-muted); font-size: 0.8rem;">Today</span>
+                                <div style="font-family: 'JetBrains Mono'; font-size: 1.4rem; font-weight: 700; color: #e2e8f5;">
+                                    {{ grid_stats['eToGridToday'] }} <span style="font-size: 0.9rem; color: var(--text-dim);">kWh</span>
+                                </div>
+                            </div>
+                            <div style="border-top: 1px solid rgba(16, 185, 129, 0.2); margin-top: 5px; padding-top: 5px;">
+                                <span style="color: var(--text-muted); font-size: 0.8rem;">Total</span>
+                                <div style="font-family: 'JetBrains Mono'; font-size: 1rem; color: var(--text-dim);">
+                                    {{ grid_stats['eToGridTotal'] }} kWh
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
             <div class="col-4 card">
                 <div class="card-title">Solar Generation</div>
                 <div class="metric-val" style="color:var(--warn)">{{ '%0.f'|format(solar) }}<span style="font-size:1.2rem">W</span></div>
@@ -2614,7 +2688,8 @@ def home():
         backup_voltage=backup_voltage, backup_pct=backup_pct,
         recommendation_items=recommendation_items, schedule_items=schedule_items,
         heavy_loads_safe=heavy_loads_safe, site_config=site_config, site_id=site_id,
-        grid_watts=grid_watts, is_importing=is_importing
+        grid_watts=grid_watts, is_importing=is_importing,
+        grid_stats=grid_stats  # <-- ADDED GRID STATS HERE
     )
 
 if __name__ == '__main__':
