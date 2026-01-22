@@ -2327,49 +2327,54 @@ def home():
             } catch { return 0; }
         }
 
-        // --- Main Logic for Monthly Stats ---
-        async function loadKplcStats() {
-            if(SITE_ID !== 'nairobi') return;
-            const costPerUnit = parseFloat(document.getElementById('kplcCost').value) || 0;
-            const now = new Date();
-            const y = now.getFullYear(), m = now.getMonth(); // 0-indexed
-            
-            // Helper to get YYYY-MM-DD in local time
-            const fmt = d => {
-                const offset = d.getTimezoneOffset() * 60000;
-                return new Date(d.getTime() - offset).toISOString().split('T')[0];
-            }
+     // --- Main Logic for Monthly Stats ---
+async function loadKplcStats() {
+    if(SITE_ID !== 'nairobi') return;
+    const costPerUnit = parseFloat(document.getElementById('kplcCost').value) || 0;
+    const now = new Date();
+    const y = now.getFullYear(), m = now.getMonth(); // 0-indexed
+    
+    // Helper to get YYYY-MM-DD in local time
+    const fmt = d => {
+        const offset = d.getTimezoneOffset() * 60000;
+        return new Date(d.getTime() - offset).toISOString().split('T')[0];
+    }
 
-            // Dates needed: Today, 1st of This Month, 1st of Last Month
-            const dates = [
-                fmt(now), // Today
-                fmt(new Date(y, m, 1)), // 1st Current
-                fmt(new Date(y, m-1, 1))  // 1st Last
-            ];
+    // We need: Today, 1st of This Month, 1st of Last Month, 1st of Month Before Last
+    const dates = [
+        fmt(now), // Today
+        fmt(new Date(y, m, 1)), // 1st Current Month
+        fmt(new Date(y, m-1, 1)), // 1st Last Month
+        fmt(new Date(y, m-2, 1))  // 1st Month Before Last
+    ];
 
-            // Fetch in parallel
-            document.getElementById('currMonthEst').innerText = "Loading...";
-            document.getElementById('kplcHistoryTable').innerText = "Loading history...";
-            
-            const vals = await Promise.all(dates.map(d => fetchTotalForDate(d)));
-            
-            // Current Month Calculation (Today - Start of Month)
-            let currUsage = 0;
-            if(vals[0] > 0 && vals[1] > 0) currUsage = vals[0] - vals[1];
-            document.getElementById('currMonthEst').innerHTML = `${currUsage.toFixed(1)} kWh <span style="font-size:0.9rem; color:var(--text-muted)">~ ${Math.round(currUsage * costPerUnit).toLocaleString()} KES</span>`;
+    // Fetch in parallel
+    document.getElementById('currMonthEst').innerText = "Loading...";
+    document.getElementById('kplcHistoryTable').innerText = "Loading history...";
+    
+    const vals = await Promise.all(dates.map(d => fetchTotalForDate(d)));
+    
+    // Current Month Calculation (Today - Start of Current Month)
+    let currUsage = 0;
+    if(vals[0] > 0 && vals[1] > 0) currUsage = vals[0] - vals[1];
+    document.getElementById('currMonthEst').innerHTML = `${currUsage.toFixed(1)} kWh <span style="font-size:0.9rem; color:var(--text-muted)">~ ${Math.round(currUsage * costPerUnit).toLocaleString()} KES</span>`;
 
-            // History Table - Only Previous Month
-            let html = '<table><tr><th>Month</th><th>Usage (kWh)</th><th>Est. Cost (KES)</th></tr>';
+    // History Table - Show actual months with correct labels
+    let html = '<table><tr><th>Month</th><th>Usage (kWh)</th><th>Est. Cost (KES)</th></tr>';
 
-            // Previous Month: vals[1] (1st curr) - vals[2] (1st prev)
-            const usage1 = (vals[1] > 0 && vals[2] > 0) ? vals[1] - vals[2] : 0;
-            const d1 = new Date(y, m-1, 1);
-            html += `<tr><td>${d1.toLocaleString('default', { month: 'long' })}</td><td>${usage1.toFixed(1)}</td><td>${Math.round(usage1 * costPerUnit).toLocaleString()}</td></tr>`;
+    // Last Month (Actual - e.g., December if today is January)
+    const lastMonthUsage = (vals[1] > 0 && vals[2] > 0) ? vals[1] - vals[2] : 0;
+    const lastMonthDate = new Date(y, m-1, 1);
+    html += `<tr><td>${lastMonthDate.toLocaleString('default', { month: 'long', year: 'numeric' })}</td><td>${lastMonthUsage.toFixed(1)}</td><td>${Math.round(lastMonthUsage * costPerUnit).toLocaleString()}</td></tr>`;
 
-            html += '</table>';
-            document.getElementById('kplcHistoryTable').innerHTML = html;
-        }
+    // Month Before Last (Actual - e.g., November if today is January)
+    const monthBeforeUsage = (vals[2] > 0 && vals[3] > 0) ? vals[2] - vals[3] : 0;
+    const monthBeforeDate = new Date(y, m-2, 1);
+    html += `<tr><td>${monthBeforeDate.toLocaleString('default', { month: 'long', year: 'numeric' })}</td><td>${monthBeforeUsage.toFixed(1)}</td><td>${Math.round(monthBeforeUsage * costPerUnit).toLocaleString()}</td></tr>`;
 
+    html += '</table>';
+    document.getElementById('kplcHistoryTable').innerHTML = html;
+}
         async function calculateCustomKPLC() {
             const start = document.getElementById('calcStart').value;
             const end = document.getElementById('calcEnd').value;
@@ -2898,3 +2903,4 @@ if __name__ == '__main__':
             Path(file).touch()
     
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+
