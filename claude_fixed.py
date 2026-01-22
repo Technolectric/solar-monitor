@@ -114,6 +114,12 @@ class KPLCBillingTracker:
         self.billing_data = self.load_billing_data()
         self.data_lock = Lock()
         
+        # API Configuration
+        self.base_url = "https://selfservice.kplc.co.ke"
+        # Public credentials from browser logs
+        self.auth_header = "Basic aVBXZkZTZTI2NkF2eVZHc2xpWk45Nl8yTzVzYTp3R3lRZEFFa3MzRm9lSkZHU0ZZUndFMERUdGNh"
+        self.session = requests.Session()
+        
     def load_billing_data(self):
         """Load historical billing data from file"""
         try:
@@ -136,39 +142,89 @@ class KPLCBillingTracker:
         except Exception as e:
             print(f"Error saving billing data: {e}", flush=True)
     
-    def scrape_kplc_bill(self):
-        """Scrape KPLC website for latest bill"""
+    def get_api_token(self):
+        """Generate a fresh session token from KPLC"""
+        url = f"{self.base_url}/api/token"
+        headers = {
+            "Authorization": self.auth_header,
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "User-Agent": "Mozilla/5.0"
+        }
         try:
-            api_url = "https://selfservice.kplc.co.ke/api/account/search"
-            
-            response = requests.post(
-                api_url,
-                json={"accountNumber": self.account_number},
-                headers={
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0"
-                },
-                timeout=10
-            )
+            resp = self.session.post(url, headers=headers, data="grant_type=client_credentials", timeout=10)
+            if resp.status_code == 200:
+                return resp.json().get("access_token")
+            else:
+                print(f"KPLC Token Failed: {resp.status_code}", flush=True)
+        except Exception as e:
+            print(f"KPLC Token Error: {e}", flush=True)
+        return None
+
+    def scrape_kplc_bill(self):
+        """Fetch KPLC bill via API"""
+        token = self.get_api_token()
+        if not token: 
+            return None
+
+        # Endpoint found in logs
+        url = f"{self.base_url}/api/publicData/4/newContractList"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0"
+        }
+        params = {"accountReference": self.account_number}
+
+        try:
+            print(f"🧾 Querying KPLC for {self.account_number}...", flush=True)
+            response = self.session.get(url, headers=headers, params=params, timeout=15)
             
             if response.status_code == 200:
                 data = response.json()
                 return self.parse_kplc_response(data)
-            
+            else:
+                print(f"KPLC API Failed: {response.status_code}", flush=True)
         except Exception as e:
-            print(f"Error scraping KPLC: {e}", flush=True)
+            print(f"Error fetching KPLC data: {e}", flush=True)
         return None
     
     def parse_kplc_response(self, data):
-        """Parse KPLC API response"""
+        """Parse JSON response based on specific KPLC structure"""
         try:
-            latest = data.get('latest_bill') or data.get('bills', [{}])[0]
+            # 1. Navigate JSON structure
+            if not data.get('data') or len(data['data']) == 0:
+                return None
+            
+            main_record = data['data'][0]
+            if not main_record.get('colBills') or len(main_record['colBills']) == 0:
+                return None
+            
+            latest = main_record['colBills'][0]
+            
+            # 2. Extract Date (Timestamp is in milliseconds)
+            bill_ts = latest.get('billDate')
+            if bill_ts:
+                bill_date_obj = datetime.fromtimestamp(bill_ts / 1000.0)
+                bill_date_str = bill_date_obj.strftime("%Y-%m-%d")
+                month_str = bill_date_obj.strftime("%Y-%m")
+            else:
+                now = datetime.now()
+                bill_date_str = now.strftime("%Y-%m-%d")
+                month_str = now.strftime("%Y-%m")
+            
+            # 3. Calculate Total kWh (Summing 'base' of Consumption concepts)
+            total_kwh = 0.0
+            for item in latest.get('concepts', []):
+                name = item.get('conceptName', '')
+                # SC3 tariff has HighRateConsumption and LowRateConsumption
+                if 'Consumption' in name and item.get('unit') == 'kWh':
+                    total_kwh += float(item.get('base', 0))
             
             return {
-                'month': latest.get('billing_month'),
-                'kwh': float(latest.get('units_consumed', 0)),
-                'amount': float(latest.get('total_amount', 0)),
-                'bill_date': latest.get('bill_date'),
+                'month': month_str,
+                'kwh': total_kwh,
+                'amount': float(latest.get('amount', 0)),
+                'bill_date': bill_date_str,
             }
         except Exception as e:
             print(f"Error parsing KPLC data: {e}", flush=True)
