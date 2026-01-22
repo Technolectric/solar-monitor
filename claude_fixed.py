@@ -139,10 +139,8 @@ class ApplianceDetector:
                         self.training_labels = models.get('training_labels', [])
                         print(f"✅ Loaded ML appliance models for {self.appliance_type}", flush=True)
                     else:
-                        print("⚠️ ML model file exists but is empty. initializing default.", flush=True)
                         self.init_default_models()
             except Exception as e:
-                print(f"⚠️ Failed to load ML models (reinitializing): {e}", flush=True)
                 self.init_default_models()
         else:
             self.init_default_models()
@@ -159,13 +157,11 @@ class ApplianceDetector:
         X = np.array(seed_data); y = np.array(seed_labels)
         self.scaler.fit(X); X_scaled = self.scaler.transform(X)
         self.appliance_classifier.fit(X_scaled, y)
-        print(f"✅ Initialized ML appliance models with seed data for {self.appliance_type}", flush=True)
     
     def save_model(self):
         try:
             with self.model_lock:
                 joblib.dump({'appliance_classifier': self.appliance_classifier, 'scaler': self.scaler, 'training_data': self.training_data, 'training_labels': self.training_labels}, self.model_file)
-            print("💾 Saved ML appliance models to disk", flush=True)
         except Exception as e: print(f"⚠️ Failed to save ML models: {e}", flush=True)
     
     def extract_features(self, load_data, time_data=None):
@@ -465,7 +461,6 @@ def poll_growatt():
                     b_volts = float(b_data.get('vBat') or 0) if b_data else 0
                     b_act = float(b_data.get('outPutPower') or 0) > 50 if b_data else False
 
-                    # Daily Accumulation
                     c_date = now.strftime('%Y-%m-%d')
                     if managers['daily_accumulator']['last_date'] != c_date:
                         if managers['daily_accumulator']['last_date']:
@@ -668,11 +663,11 @@ def home():
             .then(r => r.json()).then(d => {
                 if(d.error) { resDiv.innerHTML = "Error: " + d.error; return; }
                 resDiv.style.display = 'grid';
-                resDiv.innerHTML = `
-                    <div style="background:rgba(59,130,246,0.1); padding:10px; border-radius:8px;"><div>Import Today</div><b>\${d.eToUserToday} kWh</b></div>
-                    <div style="background:rgba(59,130,246,0.1); padding:10px; border-radius:8px;"><div>Import Total</div><b>\${d.eToUserTotal} kWh</b></div>
-                    <div style="background:rgba(16,185,129,0.1); padding:10px; border-radius:8px;"><div>Export Today</div><b>\${d.eToGridToday} kWh</b></div>
-                    <div style="background:rgba(16,185,129,0.1); padding:10px; border-radius:8px;"><div>Export Total</div><b>\${d.eToGridTotal} kWh</b></div>`;
+                resDiv.innerHTML = 
+                    '<div style="background:rgba(59,130,246,0.1); padding:10px; border-radius:8px;"><div>Import Today</div><b>' + d.eToUserToday + ' kWh</b></div>' +
+                    '<div style="background:rgba(59,130,246,0.1); padding:10px; border-radius:8px;"><div>Import Total</div><b>' + d.eToUserTotal + ' kWh</b></div>' +
+                    '<div style="background:rgba(16,185,129,0.1); padding:10px; border-radius:8px;"><div>Export Today</div><b>' + d.eToGridToday + ' kWh</b></div>' +
+                    '<div style="background:rgba(16,185,129,0.1); padding:10px; border-radius:8px;"><div>Export Total</div><b>' + d.eToGridTotal + ' kWh</b></div>';
             }).catch(e => resDiv.innerHTML = "Fetch failed");
         }
         
