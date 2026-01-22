@@ -90,13 +90,13 @@ SITES = {
         "label": "Mombasa Site Solar",
         "recipient_email": os.getenv("RECIPIENT_EMAIL_MOMBASA", os.getenv("RECIPIENT_EMAIL")),
         "inverter_config": {},
-        "primary_battery_wh": 10000,  # Adjust based on actual setup
+        "primary_battery_wh": 0,  # Adjust based on actual setup
         "backup_battery_wh": 0,
         "backup_degradation": 0,
-        "solar_capacity_kw": 8,       # Adjust based on actual capacity
+        "solar_capacity_kw": 5,       # Adjust based on actual capacity
         "latitude": -4.0435,          # Mombasa coordinates
         "longitude": 39.6682,
-        "appliance_type": "home",
+        "appliance_type": "office",
         "inverter_type": "min"        # MIN inverter series
     }
 }
@@ -3086,3 +3086,4 @@ if __name__ == '__main__':
             Path(file).touch()
     
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+
