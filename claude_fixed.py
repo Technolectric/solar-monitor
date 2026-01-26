@@ -739,6 +739,18 @@ last_alert_time = {}  # Will store {site_id: {alert_type: timestamp}}
 alert_history = {}    # Will store {site_id: [alert_list]}
 site_latest_data = {}
 
+def get_historical_weather(lat, lon, date):
+    """Fetch historical solar irradiance data for a specific date using Open-Meteo Archive API"""
+    try:
+        date_str = date.strftime('%Y-%m-%d')
+        url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={date_str}&end_date={date_str}&hourly=shortwave_radiation&timezone=Africa/Nairobi"
+        r = requests.get(url, timeout=10).json()
+        print(f"✅ Historical weather data from Open-Meteo Archive for {date_str}", flush=True)
+        return {'times': r['hourly']['time'], 'rad': r['hourly']['shortwave_radiation'], 'source': 'Open-Meteo-Archive'}
+    except Exception as e:
+        print(f"⚠️ Open-Meteo Archive failed for {date.strftime('%Y-%m-%d')}: {e}", flush=True)
+        return None
+
 def get_weather_forecast(lat, lon):
     try:
         url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=shortwave_radiation&timezone=Africa/Nairobi&forecast_days=2"
@@ -1029,7 +1041,9 @@ def poll_growatt():
                     if managers['daily_accumulator']['last_date'] != current_date:
                         if managers['daily_accumulator']['last_date']:
                             yesterday = now - timedelta(days=1)
-                            actual_irradiance_wh = calculate_daily_irradiance_potential(wx_data, yesterday, config)
+                            # Fetch actual historical weather data for yesterday
+                            historical_wx = get_historical_weather(config["latitude"], config["longitude"], yesterday)
+                            actual_irradiance_wh = calculate_daily_irradiance_potential(historical_wx, yesterday, config)
                             
                             managers['history_manager'].update_daily(
                                 managers['daily_accumulator']['last_date'],
