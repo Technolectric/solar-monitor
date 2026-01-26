@@ -2202,7 +2202,7 @@ def home():
                 <div class="sched-grid">
                     {% if site_config['appliance_type'] == 'office' %}
                         {% set sim_items = [
-                            ('Desktop Computer', 200, '🖥️'), ('Air Conditioner', 1800, '❄️'), ('Laser Printer', 800, '🖨️')
+                            ('Desktop Computer', 200, '🖥️'), ('Coffee Maker', 1200, '☕'), ('Laser Printer', 800, '🖨️')
                         ] %}
                     {% else %}
                         {% set sim_items = [
